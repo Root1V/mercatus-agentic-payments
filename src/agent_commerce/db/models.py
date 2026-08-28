@@ -1,9 +1,10 @@
 """Modelos ORM (SQLAlchemy 2.0, estilo `Mapped[...]`).
 
-Tres tablas: `users` (auth), `catalog_listings` (catálogo editable desde el
-dashboard) y `ledger_entries` (historial de llamadas de prueba). Nada de
-esto lo usa el framework "core" (`payments/`, `catalog/registry.py`,
-`client/`, `server/`) -- solo `agent_commerce.dashboard` y
+`users` (auth), `catalog_listings` (catálogo editable desde el dashboard),
+`ledger_entries` (historial de llamadas de prueba) y `agents`/
+`agent_conversations`/`agent_messages` (playground de agentes, RM-13). Nada
+de esto lo usa el framework "core" (`payments/`, `catalog/registry.py`,
+`client/`, `server/`, `agentloop/`) -- solo `agent_commerce.dashboard` y
 `agent_commerce.auth` dependen de este paquete.
 """
 
@@ -11,8 +12,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import JSON, DateTime, Numeric, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -66,3 +68,45 @@ class LedgerEntryModel(Base):
     settlement_id: Mapped[str] = mapped_column(String(200), default="")
     status: Mapped[str] = mapped_column(String(8), index=True)  # "ok" | "error"
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AgentModel(Base):
+    __tablename__ = "agents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    # Instrucciones que el usuario agrega por encima del contrato JSON fijo
+    # de AgentLoop (ver agentloop/loop.py) -- nunca lo reemplazan.
+    instructions: Mapped[str] = mapped_column(Text, default="")
+    llm_model: Mapped[str] = mapped_column(String(200))
+    protocol: Mapped[str] = mapped_column(String(16))  # "x402" | "ap2"
+    spend_limit_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentConversationModel(Base):
+    __tablename__ = "agent_conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentMessageModel(Base):
+    __tablename__ = "agent_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))  # "user" | "agent"
+    content: Mapped[str] = mapped_column(Text)
+    # Solo para role="agent": traza paso a paso del AgentLoop (lista de
+    # TraceStep serializados). Es una copia de lectura para mostrar en el
+    # panel de traza (RM-15) -- los pagos reales de cada paso quedan (como
+    # siempre) en `ledger_entries`, esto no es una segunda contabilidad.
+    trace: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    total_spent_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

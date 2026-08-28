@@ -1,4 +1,4 @@
-"""Puertos de persistencia del dashboard: `LedgerStore` y `CatalogStore`.
+"""Puertos de persistencia del dashboard: `LedgerStore`, `CatalogStore` y `AgentStore`.
 
 Mismo estilo que `payments/wallets/base.py`/`payments/protocols/base.py`:
 `dashboard/app.py` programa solo contra estos `Protocol`, nunca contra
@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from agent_commerce.catalog.models import ServiceListing
 
@@ -77,3 +77,79 @@ class CatalogStore(Protocol):
     def seed_from_json_if_empty(self, path: str) -> int:
         """Siembra el catálogo desde un JSON si está vacío. Devuelve cuántos insertó."""
         ...
+
+
+@dataclass
+class Agent:
+    id: int
+    owner_user_id: int
+    name: str
+    instructions: str
+    llm_model: str
+    protocol: str  # "x402" | "ap2"
+    spend_limit_usd: Decimal | None
+    created_at: datetime
+
+
+@dataclass
+class AgentConversation:
+    id: int
+    agent_id: int
+    title: str
+    created_at: datetime
+
+
+@dataclass
+class AgentMessage:
+    id: int
+    conversation_id: int
+    role: str  # "user" | "agent"
+    content: str
+    trace: list[dict[str, Any]] | None
+    total_spent_usd: Decimal | None
+    created_at: datetime
+
+
+@runtime_checkable
+class AgentStore(Protocol):
+    """Persistencia del playground de agentes (RM-13): agentes, sus
+    conversaciones y los mensajes de cada una. Deliberadamente un solo
+    puerto para las tres entidades -- siempre se usan juntas (no tiene
+    sentido un `AgentConversation` sin su `Agent`), a diferencia de
+    `CatalogStore`/`LedgerStore` que sí son independientes entre sí.
+    """
+
+    def create_agent(
+        self,
+        *,
+        owner_user_id: int,
+        name: str,
+        instructions: str,
+        llm_model: str,
+        protocol: str,
+        spend_limit_usd: Decimal | None,
+    ) -> Agent: ...
+
+    def list_agents(self, *, owner_user_id: int) -> list[Agent]: ...
+
+    def get_agent(self, agent_id: int) -> Agent | None: ...
+
+    def delete_agent(self, agent_id: int) -> bool: ...
+
+    def create_conversation(self, *, agent_id: int, title: str) -> AgentConversation: ...
+
+    def list_conversations(self, agent_id: int) -> list[AgentConversation]: ...
+
+    def get_conversation(self, conversation_id: int) -> AgentConversation | None: ...
+
+    def add_message(
+        self,
+        *,
+        conversation_id: int,
+        role: str,
+        content: str,
+        trace: list[dict[str, Any]] | None = None,
+        total_spent_usd: Decimal | None = None,
+    ) -> AgentMessage: ...
+
+    def list_messages(self, conversation_id: int) -> list[AgentMessage]: ...

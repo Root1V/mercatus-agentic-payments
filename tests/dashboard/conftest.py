@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -18,6 +18,16 @@ def db_session() -> Iterator[Session]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    # SQLite ignora las FK constraints (y por lo tanto ON DELETE CASCADE) a
+    # menos que se pidan explícitamente por conexión -- sin esto, los tests
+    # de cascada de agents/agent_conversations/agent_messages pasarían en
+    # SQLite aunque la cascada estuviera rota, y solo fallarían en Postgres.
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection: object, _: object) -> None:
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     Base.metadata.create_all(bind=engine)
     factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = factory()
