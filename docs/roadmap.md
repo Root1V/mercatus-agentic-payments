@@ -141,10 +141,19 @@ entregable central del panel de traza del playground (RM-15). 10 tests con doble
 <a id="rm-13"></a>
 
 ## RM-13 — Persistencia de agentes/conversaciones
-**Estado:** ⬜ Backlog
+**Estado:** ✅ Hecho
 
-Tablas `AgentModel`/`AgentConversationModel`/`AgentMessageModel` + migración Alembic. Los pagos
-del agente caen en la misma tabla `ledger_entries` de siempre (sin contabilidad duplicada).
+Tablas `AgentModel`/`AgentConversationModel`/`AgentMessageModel` (`db/models.py`) + migración
+Alembic `0002_agent_playground.py`, con `ON DELETE CASCADE` real (agente → conversaciones →
+mensajes) verificado en el test con la pragma `foreign_keys=ON` de SQLite explícita (si no,
+SQLite ignora la cascada en silencio y solo se vería el problema en Postgres). Puerto `AgentStore`
+nuevo en `dashboard/ports.py` (mismo patrón que `LedgerStore`/`CatalogStore`: un solo puerto para
+las tres entidades porque siempre se usan juntas), con adaptadores `SqlAgentStore`/
+`InMemoryAgentStore`. `AgentMessageModel.trace`/`total_spent_usd` son una copia de lectura del
+resultado de `AgentLoop` (RM-12) para el panel de traza (RM-15) -- los pagos del agente caen en la
+misma tabla `ledger_entries` de siempre (sin contabilidad duplicada); wire-up real de eso queda
+para RM-14 (API del playground), que es quien construye el `AgentLoop` y llama a `LedgerStore` por
+cada `call_service`, igual que ya hace `/api/test-call` hoy.
 
 <a id="rm-14"></a>
 

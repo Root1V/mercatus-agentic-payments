@@ -18,7 +18,7 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-10](docs/roadmap.md#rm-10) | Edición de catálogo + UX del recibo | ✅ Hecho | Editar/crear servicio con proveedor, botones de copiar en el recibo |
 | [RM-11](docs/roadmap.md#rm-11) | Cliente LLM (Prometheus) | ✅ Hecho | OAuth2 + chat completions contra el gateway local |
 | [RM-12](docs/roadmap.md#rm-12) | Loop del agente (tool-use) | ✅ Hecho | Contrato JSON tipo ReAct (sin function-calling nativo), límite de gasto |
-| [RM-13](docs/roadmap.md#rm-13) | Persistencia de agentes/conversaciones | ⬜ Backlog | Tablas `Agent`/`Conversation`/`Message` + migración |
+| [RM-13](docs/roadmap.md#rm-13) | Persistencia de agentes/conversaciones | ✅ Hecho | Tablas `Agent`/`Conversation`/`Message` + migración |
 | [RM-14](docs/roadmap.md#rm-14) | API del playground | ⬜ Backlog | Endpoints para crear agentes, conversar, ver historial |
 | [RM-15](docs/roadmap.md#rm-15) | Frontend del playground | ⬜ Backlog | Chat + panel de traza (pensamiento, tool, pago, respuesta) |
 | [RM-16](docs/roadmap.md#rm-16) | Playground: producción | ⬜ Backlog | Streaming, manejo de fallos visible, docs de despliegue de Prometheus |
