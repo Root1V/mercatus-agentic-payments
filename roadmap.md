@@ -16,7 +16,7 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-08](docs/roadmap.md#rm-08) | Frontend del dashboard | ✅ Hecho | React 19 + Vite + Tailwind + TanStack Query |
 | [RM-09](docs/roadmap.md#rm-09) | Docker Compose | 🟡 Parcial | Escrito y revisado; build no se pudo ejecutar en este sandbox (sin red a registries) |
 | [RM-10](docs/roadmap.md#rm-10) | Edición de catálogo + UX del recibo | ✅ Hecho | Editar/crear servicio con proveedor, botones de copiar en el recibo |
-| [RM-11](docs/roadmap.md#rm-11) | Cliente LLM (Prometheus) | ⬜ Backlog | OAuth2 + chat completions contra el gateway local |
+| [RM-11](docs/roadmap.md#rm-11) | Cliente LLM (Prometheus) | ✅ Hecho | OAuth2 + chat completions contra el gateway local |
 | [RM-12](docs/roadmap.md#rm-12) | Loop del agente (tool-use) | ⬜ Backlog | Contrato JSON tipo ReAct (sin function-calling nativo), límite de gasto |
 | [RM-13](docs/roadmap.md#rm-13) | Persistencia de agentes/conversaciones | ⬜ Backlog | Tablas `Agent`/`Conversation`/`Message` + migración |
 | [RM-14](docs/roadmap.md#rm-14) | API del playground | ⬜ Backlog | Endpoints para crear agentes, conversar, ver historial |

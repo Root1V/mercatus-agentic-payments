@@ -100,12 +100,22 @@ los IDs del recibo de pago (`BuyerTestPage`).
 <a id="rm-11"></a>
 
 ## RM-11 — Cliente LLM (Prometheus)
-**Estado:** ⬜ Backlog
+**Estado:** ✅ Hecho
 
-`llm/client.py`: OAuth2 `client_credentials` contra el `auth-service` de Prometheus
-(`edge-ai-inference`, puerto 9000) + `POST /v1/chat/completions` contra su gateway. URL/modelo
-100% configurables (`Settings`) -- el puerto convencional del gateway (8000) choca con el del
-propio dashboard. Token de ~300s, requiere refresco, no solo fetch inicial.
+`llm/client.py` (`PrometheusLLMClient`): OAuth2 `client_credentials` contra
+`POST {auth_base_url}/oauth2/token` del `auth-service` de Prometheus (`edge-ai-inference`,
+puerto 9000 por defecto) + `POST /v1/chat/completions` y `GET /v1/models` contra su gateway.
+Contrato verificado leyendo el código fuente real de Prometheus (no asumido): form-encoded en
+`/oauth2/token`, `expires_in` depende del rol del client_id (300s para el rol "app"), errores de
+auth en shape RFC 6749 §5.2, errores del gateway en RFC 9457 Problem Details (no el
+`{"error": {...}}` de OpenAI). El token se cachea en memoria y se refresca automáticamente antes
+de expirar (margen configurable), nunca solo en el fetch inicial. URL/modelo/credenciales 100%
+configurables vía `Settings` (`AGENT_COMMERCE_LLM_*`) -- el puerto convencional del gateway (8000)
+choca con el del propio dashboard, por eso el default de `llm_gateway_base_url` es 8001. Confirmado
+que el gateway de Prometheus no soporta `tools`/`tool_choice` (los descarta en silencio): el
+tool-use de RM-12 no puede delegar en function-calling nativo. Tests con `httpx.MockTransport`
+(sin red real): fetch/caché/refresco de token, error de auth, error RFC 9457 del gateway,
+`list_models` sin auth.
 
 <a id="rm-12"></a>
 
