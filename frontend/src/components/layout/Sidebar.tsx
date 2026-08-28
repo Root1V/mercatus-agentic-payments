@@ -1,5 +1,6 @@
 import {
   Activity,
+  Bot,
   GitCompare,
   LayoutDashboard,
   Package,
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
   { to: "/catalogo", label: "Catálogo", icon: Package },
   { to: "/comparar", label: "Comparar protocolos", icon: GitCompare },
   { to: "/actividad", label: "Actividad", icon: Activity },
+  { to: "/agentes", label: "Agentes", icon: Bot },
 ];
 
 export function Sidebar() {

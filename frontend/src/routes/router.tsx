@@ -7,6 +7,7 @@ import { SellerTestPage } from "@/pages/SellerTestPage";
 import { CatalogPage } from "@/pages/CatalogPage";
 import { CompareProtocolsPage } from "@/pages/CompareProtocolsPage";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { AgentPlaygroundPage } from "@/pages/AgentPlaygroundPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 
 export const router = createBrowserRouter([
@@ -20,6 +21,7 @@ export const router = createBrowserRouter([
       { path: "/catalogo", element: <CatalogPage /> },
       { path: "/comparar", element: <CompareProtocolsPage /> },
       { path: "/actividad", element: <ActivityPage /> },
+      { path: "/agentes", element: <AgentPlaygroundPage /> },
     ],
   },
   { path: "*", element: <NotFoundPage /> },

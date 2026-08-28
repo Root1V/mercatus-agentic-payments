@@ -194,11 +194,36 @@ en proceso. Más 1 test nuevo en `tests/agentloop/test_loop.py` para `extra_inst
 <a id="rm-15"></a>
 
 ## RM-15 — Frontend del playground
-**Estado:** ⬜ Backlog
+**Estado:** ✅ Hecho
 
-`pages/PlaygroundPage.tsx`: crear agente (nombre, prompt, modelo, protocolo, límite de gasto) +
-chat con panel de traza expandible por turno (pensamiento → tool buscada → recibo de pago →
-resultado → respuesta final). La traza es el entregable central del pedido del usuario.
+`pages/AgentPlaygroundPage.tsx` (ruta `/agentes`): panel de agentes (crear con nombre,
+prompt/instrucciones, modelo -- `Select` poblado desde `GET /api/agents/llm-models`, o un
+`Input` de texto libre si Prometheus no está configurado, el 500 se degrada con gracia --
+protocolo, límite de gasto; listar; borrar) + chat con historial persistido (`useMessages`) y
+composer. Cada mensaje del agente muestra su `TraceStep[]` (RM-12/13) en
+`components/dashboard/TraceStepView.tsx`: un `<details>` nativo por turno (sin agregar un
+componente Accordion nuevo) con el pensamiento, y una vista dedicada por tipo de observación --
+resultados de `search_catalog`, recibo de pago (servicio/monto/ID de liquidación con
+`CopyButton`) de `call_service`, o el error si la acción falló -- más el total gastado de la
+respuesta. Sigue los mismos patrones ya establecidos del dashboard (`api/`, `hooks/` con
+TanStack Query, primitivos de `components/ui/`, `ProtocolBadge`) sin introducir ninguno nuevo.
+
+Bug encontrado y corregido durante la verificación manual en navegador: la card de cada agente
+tenía un `<button>` de borrar anidado dentro del `<button>` de selección -- HTML inválido que
+React reporta como error de hidratación y rompe el manejo de eventos. Se resolvió separando
+ambos botones como hermanos dentro de un `<div className="relative">`, con el de borrar
+posicionado en la esquina. También se encontró que `useLlmModels()` (que falla con 500 cuando
+Prometheus no está configurado, el caso normal en este sandbox) se quedaba con `fetchStatus:
+"paused"` indefinidamente en vez de asentarse en `isError` -- el retry por defecto de TanStack
+Query interactúa mal con la detección de conectividad del navegador de este entorno. Se fijó
+`retry: false` en ese hook (correcto de todos modos: un 500 de configuración faltante nunca se
+arregla reintentando).
+
+Verificado de punta a punta en el navegador contra el backend real (SQLite local, sin Prometheus
+configurado): crear agente con fallback de modelo manual, iniciar conversación, enviar mensaje y
+ver el error 500 mostrado sin romper la UI, borrar agente. El flujo completo con un LLM real
+(respuesta exitosa, `call_service` pagando de verdad) no se pudo probar en este sandbox por no
+tener Prometheus corriendo -- mismo límite que RM-11.
 
 <a id="rm-16"></a>
 

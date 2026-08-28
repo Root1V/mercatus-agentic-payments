@@ -20,5 +20,5 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-12](docs/roadmap.md#rm-12) | Loop del agente (tool-use) | ✅ Hecho | Contrato JSON tipo ReAct (sin function-calling nativo), límite de gasto |
 | [RM-13](docs/roadmap.md#rm-13) | Persistencia de agentes/conversaciones | ✅ Hecho | Tablas `Agent`/`Conversation`/`Message` + migración |
 | [RM-14](docs/roadmap.md#rm-14) | API del playground | ✅ Hecho | Endpoints para crear agentes, conversar, ver historial |
-| [RM-15](docs/roadmap.md#rm-15) | Frontend del playground | ⬜ Backlog | Chat + panel de traza (pensamiento, tool, pago, respuesta) |
+| [RM-15](docs/roadmap.md#rm-15) | Frontend del playground | ✅ Hecho | Chat + panel de traza (pensamiento, tool, pago, respuesta) |
 | [RM-16](docs/roadmap.md#rm-16) | Playground: producción | ⬜ Backlog | Streaming, manejo de fallos visible, docs de despliegue de Prometheus |
