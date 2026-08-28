@@ -3,6 +3,8 @@ name = "agent-commerce"
 version = "0.1.0"
 description = "Framework de doble cara (vender/comprar) para agentic commerce, con adaptadores intercambiables de protocolo de pago (x402, AP2) y de custodia de wallet (local, Circle)."
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Emeric V. Espiritu Santiago" }]
 requires-python = ">=3.11"
 dependencies = [
   "x402[fastapi,httpx,requests,evm]>=2.21,<3",
