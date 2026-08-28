@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agent_commerce
+      POSTGRES_USER: agent_commerce
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_commerce}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_commerce"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      AGENT_COMMERCE_DATABASE_URL: postgresql+psycopg://agent_commerce:${POSTGRES_PASSWORD:-agent_commerce}@postgres:5432/agent_commerce
+      AGENT_COMMERCE_JWT_SECRET_KEY: ${JWT_SECRET_KEY:?falta JWT_SECRET_KEY en .env}
+      AGENT_COMMERCE_MODE: ${AGENT_COMMERCE_MODE:-mock}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+volumes:
+  postgres_data:

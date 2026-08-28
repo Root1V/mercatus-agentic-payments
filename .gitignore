@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.env
+migrations/*.db
+data/*.db
+
+# Frontend (uv.lock SÍ se commitea; node_modules/dist no)
+frontend/node_modules/
+frontend/dist/

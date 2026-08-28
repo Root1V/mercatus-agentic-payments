@@ -1,0 +1,153 @@
+# Roadmap — detalle por feature
+
+Índice y tabla de estado en [../roadmap.md](../roadmap.md). Este documento agrega contexto breve
+por feature (qué es, archivos clave, decisiones/caveats) -- no el historial completo de cada
+sesión de trabajo.
+
+<a id="rm-01"></a>
+
+## RM-01 — Núcleo x402
+**Estado:** ✅ Hecho
+
+Adaptador del protocolo x402 (liquidación directa en USDC vía EIP-3009/HTTP 402).
+`payments/protocols/x402_protocol.py` + `payments/mock_facilitator.py` (verificación EIP-712
+real, liquidación simulada en memoria para modo mock). Modo testnet implementado
+(`HTTPFacilitatorClient` real), no ejecutado contra fondos reales.
+
+<a id="rm-02"></a>
+
+## RM-02 — Núcleo AP2
+**Estado:** ✅ Hecho
+
+Adaptador del protocolo AP2 de Google (mandatos `Intent`→`Cart`→`Payment`, agnóstico al riel de
+pago). `payments/protocols/ap2_protocol.py`, liquida delegando en el mismo motor x402 (como la
+extensión oficial `a2a-x402`). Simplificación deliberada: transporte HTTP 402 + reintento, no el
+transporte A2A oficial de Google.
+
+<a id="rm-03"></a>
+
+## RM-03 — Catálogo + agentes comprador/vendedor
+**Estado:** ✅ Hecho
+
+`catalog/registry.py` (`ServiceRegistry`), `client/paying_agent.py` (`PayingAgent`),
+`server/monetize.py`, ejemplo `examples/seller_text_summarizer/` y
+`examples/agent_to_agent_demo.py` (demo end-to-end, ambos protocolos).
+
+<a id="rm-04"></a>
+
+## RM-04 — CLI
+**Estado:** ✅ Hecho
+
+`agent-commerce demo|call|serve-example|catalog list|catalog seed|create-admin|dashboard`
+(`cli/main.py`, Typer).
+
+<a id="rm-05"></a>
+
+## RM-05 — Análisis del modelo de negocio
+**Estado:** ✅ Hecho
+
+[`docs/business_model_analysis.md`](business_model_analysis.md): análisis crítico de
+Circle/x402/AP2 (incentivos, riesgo de dos lados, seguridad, regulación) que motivó el diseño
+sin acoplamiento a un proveedor.
+
+<a id="rm-06"></a>
+
+## RM-06 — Wallet Circle (custodia real)
+**Estado:** 🟡 Parcial
+
+`payments/wallets/circle_wallet.py`: adaptador opcional (`agent-commerce[circle]`), import
+perezoso. El método exacto de firma EIP-712 del SDK de Circle no se pudo confirmar sin
+credenciales reales -- queda documentado en el propio archivo como pendiente de verificación.
+
+<a id="rm-07"></a>
+
+## RM-07 — Backend del dashboard
+**Estado:** ✅ Hecho
+
+FastAPI + SQLAlchemy 2.0 + Alembic + PostgreSQL + JWT (`db/`, `auth/`, `dashboard/`). Puertos
+`LedgerStore`/`CatalogStore` con adaptadores SQL y en memoria (mismo patrón que
+`WalletSigner`/`PaymentProtocol`). 54 tests, `ruff`/`mypy` en verde.
+
+<a id="rm-08"></a>
+
+## RM-08 — Frontend del dashboard
+**Estado:** ✅ Hecho
+
+`frontend/`: React 19 + Vite + TypeScript + Tailwind v4 + TanStack Query + react-router-dom +
+axios + lucide-react. 6 páginas (Inicio, Probar comprador/vendedor, Catálogo, Comparar
+protocolos, Actividad) + login JWT. Verificado en navegador de punta a punta con ambos
+protocolos.
+
+<a id="rm-09"></a>
+
+## RM-09 — Docker Compose
+**Estado:** 🟡 Parcial
+
+`Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml`, `docker/api-entrypoint.sh` escritos y
+revisados a mano (rutas, extras de `uv`, permisos). `docker compose build` no se pudo ejecutar en
+el sandbox de la sesión que lo creó (sin salida de red hacia Docker Hub/ghcr.io, confirmado con
+varios intentos). Pendiente: correr `docker compose up --build` en un entorno con red normal.
+
+<a id="rm-10"></a>
+
+## RM-10 — Edición de catálogo + UX del recibo
+**Estado:** ✅ Hecho
+
+`PUT /api/catalog/{id}` + `CatalogStore.update()`; botón editar en `CatalogTable`; campo
+"Proveedor" en el formulario de alta/edición; `components/ui/copy-button.tsx` reutilizable en
+los IDs del recibo de pago (`BuyerTestPage`).
+
+<a id="rm-11"></a>
+
+## RM-11 — Cliente LLM (Prometheus)
+**Estado:** ⬜ Backlog
+
+`llm/client.py`: OAuth2 `client_credentials` contra el `auth-service` de Prometheus
+(`edge-ai-inference`, puerto 9000) + `POST /v1/chat/completions` contra su gateway. URL/modelo
+100% configurables (`Settings`) -- el puerto convencional del gateway (8000) choca con el del
+propio dashboard. Token de ~300s, requiere refresco, no solo fetch inicial.
+
+<a id="rm-12"></a>
+
+## RM-12 — Loop del agente (tool-use)
+**Estado:** ⬜ Backlog
+
+`agentloop/loop.py`: el gateway de Prometheus **no soporta function-calling nativo** (confirmado
+leyendo su código) -- tool-use vía contrato JSON estricto en el prompt (patrón ReAct), parseado a
+mano, con reintento ante JSON inválido y límite duro de turnos. Reusa `PayingAgent.call_service`
+para pagos reales. Incluye límite de gasto por agente/llamada (no existe hoy en el framework).
+
+<a id="rm-13"></a>
+
+## RM-13 — Persistencia de agentes/conversaciones
+**Estado:** ⬜ Backlog
+
+Tablas `AgentModel`/`AgentConversationModel`/`AgentMessageModel` + migración Alembic. Los pagos
+del agente caen en la misma tabla `ledger_entries` de siempre (sin contabilidad duplicada).
+
+<a id="rm-14"></a>
+
+## RM-14 — API del playground
+**Estado:** ⬜ Backlog
+
+`POST /api/agents`, `GET /api/agents`, `GET /api/agents/llm-models` (proxy a
+`GET /v1/models` de Prometheus), `POST .../conversations`, `POST .../messages`. Protegido con
+JWT como el resto de `/api/*`.
+
+<a id="rm-15"></a>
+
+## RM-15 — Frontend del playground
+**Estado:** ⬜ Backlog
+
+`pages/PlaygroundPage.tsx`: crear agente (nombre, prompt, modelo, protocolo, límite de gasto) +
+chat con panel de traza expandible por turno (pensamiento → tool buscada → recibo de pago →
+resultado → respuesta final). La traza es el entregable central del pedido del usuario.
+
+<a id="rm-16"></a>
+
+## RM-16 — Playground: producción
+**Estado:** ⬜ Backlog
+
+Streaming SSE (pospuesto del MVP), manejo visible de fallos del gateway (nunca un 500 genérico),
+documentar en el README cómo levantar Prometheus sin chocar puertos y registrar `agent_commerce`
+como cliente OAuth2.

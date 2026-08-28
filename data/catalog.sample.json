@@ -1,0 +1,13 @@
+[
+  {
+    "id": "text-summarizer",
+    "name": "Text Summarizer",
+    "description": "Resume un texto a N oraciones clave por extracción de frecuencia de palabras.",
+    "method": "POST",
+    "url": "http://127.0.0.1:8901/summarize",
+    "price_usd": "$0.001",
+    "capability_tags": ["summarize", "text", "research", "nlp"],
+    "protocols": ["x402", "ap2"],
+    "provider_name": "agent_commerce demo"
+  }
+]
