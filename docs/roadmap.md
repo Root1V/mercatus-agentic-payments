@@ -120,12 +120,23 @@ tool-use de RM-12 no puede delegar en function-calling nativo. Tests con `httpx.
 <a id="rm-12"></a>
 
 ## RM-12 — Loop del agente (tool-use)
-**Estado:** ⬜ Backlog
+**Estado:** ✅ Hecho
 
-`agentloop/loop.py`: el gateway de Prometheus **no soporta function-calling nativo** (confirmado
-leyendo su código) -- tool-use vía contrato JSON estricto en el prompt (patrón ReAct), parseado a
-mano, con reintento ante JSON inválido y límite duro de turnos. Reusa `PayingAgent.call_service`
-para pagos reales. Incluye límite de gasto por agente/llamada (no existe hoy en el framework).
+`agentloop/loop.py` (`AgentLoop`): el gateway de Prometheus **no soporta function-calling nativo**
+(confirmado en RM-11 leyendo su código) -- tool-use vía contrato JSON estricto en el prompt
+(patrón ReAct: `thought`/`action`/`action_input`), parseado a mano en `_parse_action` (tolera
+fences de markdown que algunos modelos locales agregan pese a la instrucción de no hacerlo).
+Reintento de hasta `max_json_retries_per_turn` veces si el modelo no devuelve JSON válido, y
+límite duro de `max_turns` (`MaxTurnsExceededError` si nunca llega a `final_answer`). Tres
+acciones: `search_catalog` (via `PayingAgent.discover`), `call_service` (via
+`PayingAgent.call_service`, pagos reales) y `final_answer`. Límite de gasto opcional
+(`spend_limit_usd`, nuevo -- no existía en el framework): antes de pagar, se calcula el precio del
+listing con `x402.schemas.helpers.parse_money` y si excedería el límite se rechaza la acción como
+una `observation` de error (el modelo la ve y puede responder sin pagar), sin llamar a
+`call_service`. Cualquier falla real de la llamada (servicio caído, HTTP 4xx/5xx) también se
+reporta como `observation`, nunca tumba el loop. Cada paso queda en `TraceStep` -- es el
+entregable central del panel de traza del playground (RM-15). 10 tests con dobles simples de
+`PrometheusLLMClient`/`PayingAgent` (sin red, sin LLM real).
 
 <a id="rm-13"></a>
 
