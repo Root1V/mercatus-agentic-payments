@@ -218,6 +218,24 @@ async def test_markdown_fenced_json_is_parsed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_extra_instructions_are_appended_to_system_prompt() -> None:
+    llm = FakeLLM([_final_answer_json("done")])
+    loop = AgentLoop(
+        llm=llm,
+        paying_agent=FakePayingAgent([]),
+        model="test-model",
+        extra_instructions="Always answer in pirate speak.",
+    )
+
+    await loop.run("hi")
+
+    system_message = llm.calls[0][0]
+    assert system_message["role"] == "system"
+    assert "Always answer in pirate speak." in system_message["content"]
+    assert "search_catalog" in system_message["content"]  # el contrato JSON sigue presente
+
+
+@pytest.mark.asyncio
 async def test_search_catalog_no_matches_returns_error_observation() -> None:
     search_json = json.dumps(
         {"thought": "look", "action": "search_catalog", "action_input": {"query": "nonexistent"}}
