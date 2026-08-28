@@ -64,6 +64,19 @@ class Settings(BaseSettings):
     admin_username: str | None = None
     admin_password: SecretStr | None = None
 
+    # --- LLM (Prometheus, plataforma de inferencia local, repo hermano
+    # "edge-ai-inference") -- usado por el playground de agentes (RM-11+).
+    # Nada de esto se usa fuera de `agent_commerce.llm`/`agent_commerce.agentloop`;
+    # queda opcional para no romper Settings() en el resto del framework.
+    llm_auth_base_url: str = "http://localhost:9000"
+    # Puerto por defecto del gateway de Prometheus (8000) choca con el del
+    # propio dashboard: en un despliegue conjunto hay que reconfigurar uno
+    # de los dos, por eso este default apunta a 8001.
+    llm_gateway_base_url: str = "http://localhost:8001"
+    llm_client_id: str | None = None
+    llm_client_secret: SecretStr | None = None
+    llm_model: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:
