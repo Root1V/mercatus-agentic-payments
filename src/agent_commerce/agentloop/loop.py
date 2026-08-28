@@ -130,6 +130,7 @@ class AgentLoop:
         max_turns: int = 8,
         max_json_retries_per_turn: int = 2,
         spend_limit_usd: Decimal | None = None,
+        extra_instructions: str = "",
     ) -> None:
         self._llm = llm
         self._paying_agent = paying_agent
@@ -138,10 +139,15 @@ class AgentLoop:
         self._max_json_retries_per_turn = max_json_retries_per_turn
         self._spend_limit_usd = spend_limit_usd
         self._spent_usd = Decimal(0)
+        # Persona/instrucciones del usuario (p. ej. el "prompt" que se define
+        # al crear el agente en el playground, RM-15): se agregan DESPUÉS del
+        # contrato JSON fijo, nunca lo reemplazan -- si contradicen el
+        # contrato, el modelo puede dejar de responder en JSON válido.
+        self._system_prompt = f"{_SYSTEM_PROMPT}\n\n{extra_instructions}" if extra_instructions else _SYSTEM_PROMPT
 
     async def run(self, user_message: str) -> AgentLoopResult:
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": user_message},
         ]
         trace: list[TraceStep] = []

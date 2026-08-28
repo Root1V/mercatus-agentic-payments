@@ -158,11 +158,38 @@ cada `call_service`, igual que ya hace `/api/test-call` hoy.
 <a id="rm-14"></a>
 
 ## RM-14 — API del playground
-**Estado:** ⬜ Backlog
+**Estado:** ✅ Hecho
 
-`POST /api/agents`, `GET /api/agents`, `GET /api/agents/llm-models` (proxy a
-`GET /v1/models` de Prometheus), `POST .../conversations`, `POST .../messages`. Protegido con
-JWT como el resto de `/api/*`.
+`dashboard/app.py`: `POST/GET /api/agents`, `DELETE /api/agents/{id}`, `GET
+/api/agents/llm-models` (proxy a `GET /v1/models` de Prometheus, RM-11),
+`POST/GET /api/agents/{id}/conversations`, `POST/GET .../messages`. Protegido con JWT como el
+resto de `/api/*`, y con ownership explícito (`_get_owned_agent`/`_get_owned_conversation`): un
+usuario no puede ver ni operar agentes de otro. `PrometheusLLMClient` (RM-11) se construye una
+sola vez al levantar el dashboard (no por request, para reusar el caché de token) solo si
+`AGENT_COMMERCE_LLM_CLIENT_ID`/`_SECRET` están configurados -- si no, los endpoints que lo
+necesitan devuelven 500 explicando qué falta, el resto del dashboard sigue funcionando igual.
+
+`POST .../messages` arma un `PayingAgent` (mismo patrón que `/api/test-call`: catálogo real
+en memoria con el único servicio real disponible, `text-summarizer`, contra el vendedor que ya
+levanta el dashboard) y corre un `AgentLoop` (RM-12) con `extra_instructions=agent.instructions`
+(agregado a `AgentLoop` en esta fase, ver abajo) y `spend_limit_usd=agent.spend_limit_usd`. Un
+`AgentLoopError` (turnos agotados, JSON inválido tras reintentos) se persiste como mensaje del
+agente con el detalle del error -- nunca un 500 genérico. Cada paso `call_service` exitoso de la
+traza se registra en `ledger_entries` vía `LedgerStore` (RM-13), igual que ya hace
+`/api/test-call`. Memoria de conversación: los turnos previos se aplanan a texto plano y se
+anteponen al mensaje nuevo (`_build_prompt_with_history`) -- `AgentLoop.run()` sigue razonando
+sobre un único mensaje, no se le agregó soporte de historial estructurado (fuera de alcance de
+esta fase).
+
+Cambio a `agentloop/loop.py` (RM-12) necesario para que esto funcione bien: `AgentLoop` ahora
+acepta `extra_instructions: str = ""`, agregado DESPUÉS del contrato JSON fijo del system prompt
+-- así el "prompt" que se define al crear el agente (RM-15) es una persona/instrucción adicional,
+nunca reemplaza el contrato ReAct.
+
+10 tests nuevos (`tests/dashboard/test_agents_api.py`) contra un mock real del auth-service/
+gateway de Prometheus levantado como servidor `uvicorn` (mismo patrón que los vendedores x402/AP2
+de `test_dashboard_app.py`) -- ejercita el `PrometheusLLMClient` real de punta a punta, sin dobles
+en proceso. Más 1 test nuevo en `tests/agentloop/test_loop.py` para `extra_instructions`.
 
 <a id="rm-15"></a>
 

@@ -47,17 +47,22 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from x402.http.utils import decode_payment_required_header
 
+from agent_commerce.agentloop.loop import AgentLoop, AgentLoopError
 from agent_commerce.auth.dependencies import get_current_user
 from agent_commerce.auth.router import router as auth_router
 from agent_commerce.catalog.models import ServiceListing
 from agent_commerce.catalog.registry import InMemoryServiceRegistry
 from agent_commerce.client.paying_agent import NoMatchingServiceError, PayingAgent
 from agent_commerce.config import Protocol, Settings, get_settings
+from agent_commerce.db.models import UserModel
 from agent_commerce.db.session import get_db
+from agent_commerce.llm.client import LLMClientError, PrometheusLLMClient
 from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
 
+from .adapters.sql_agent_store import SqlAgentStore
 from .adapters.sql_catalog_store import SqlCatalogStore
 from .adapters.sql_ledger_store import SqlLedgerStore
+from .ports import Agent, AgentConversation, AgentMessage
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CATALOG_SEED_PATH = _REPO_ROOT / "data" / "catalog.sample.json"
@@ -120,6 +125,86 @@ class UpdateCatalogListingRequest(BaseModel):
     provider_name: str = "agent_commerce demo"
 
 
+class CreateAgentRequest(BaseModel):
+    name: str
+    instructions: str = ""
+    llm_model: str
+    protocol: str
+    spend_limit_usd: Decimal | None = None
+
+
+class CreateConversationRequest(BaseModel):
+    title: str = ""
+
+
+class CreateMessageRequest(BaseModel):
+    content: str
+
+
+def _agent_to_dict(agent: Agent) -> dict[str, Any]:
+    return {
+        "id": agent.id,
+        "owner_user_id": agent.owner_user_id,
+        "name": agent.name,
+        "instructions": agent.instructions,
+        "llm_model": agent.llm_model,
+        "protocol": agent.protocol,
+        "spend_limit_usd": str(agent.spend_limit_usd) if agent.spend_limit_usd is not None else None,
+        "created_at": agent.created_at.isoformat(),
+    }
+
+
+def _conversation_to_dict(conversation: AgentConversation) -> dict[str, Any]:
+    return {
+        "id": conversation.id,
+        "agent_id": conversation.agent_id,
+        "title": conversation.title,
+        "created_at": conversation.created_at.isoformat(),
+    }
+
+
+def _message_to_dict(message: AgentMessage) -> dict[str, Any]:
+    return {
+        "id": message.id,
+        "conversation_id": message.conversation_id,
+        "role": message.role,
+        "content": message.content,
+        "trace": message.trace,
+        "total_spent_usd": str(message.total_spent_usd) if message.total_spent_usd is not None else None,
+        "created_at": message.created_at.isoformat(),
+    }
+
+
+def _get_owned_agent(store: SqlAgentStore, agent_id: int, owner_user_id: int) -> Agent:
+    agent = store.get_agent(agent_id)
+    if agent is None or agent.owner_user_id != owner_user_id:
+        raise HTTPException(404, f"No existe un agente con id {agent_id}")
+    return agent
+
+
+def _get_owned_conversation(store: SqlAgentStore, conversation_id: int, agent: Agent) -> AgentConversation:
+    conversation = store.get_conversation(conversation_id)
+    if conversation is None or conversation.agent_id != agent.id:
+        raise HTTPException(404, f"No existe una conversación con id {conversation_id}")
+    return conversation
+
+
+def _build_prompt_with_history(prior_messages: list[AgentMessage], new_content: str) -> str:
+    """Concatena los turnos previos como texto plano antes del mensaje nuevo.
+
+    `AgentLoop.run()` (RM-12) razona sobre un único mensaje de usuario, sin
+    noción de "conversación" -- para dar continuidad entre mensajes sin
+    tocar su contrato, el historial se aplana a texto aquí, en la capa de
+    API. Es una memoria simple (solo el texto de cada turno, no la traza
+    completa de tool-use de turnos anteriores); una memoria más rica queda
+    fuera del alcance de RM-14.
+    """
+    if not prior_messages:
+        return new_content
+    lines = [f"{'User' if m.role == 'user' else 'Assistant'}: {m.content}" for m in prior_messages]
+    return "Conversation so far:\n" + "\n".join(lines) + f"\n\nUser: {new_content}"
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -159,16 +244,57 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         seller_servers.append(_start_uvicorn(seller_app, port))
         seller_ports[name] = port
 
+    # Cliente al gateway de Prometheus (RM-11) para el playground de agentes
+    # (RM-14) -- opcional: sin AGENT_COMMERCE_LLM_CLIENT_ID/SECRET el resto
+    # del dashboard sigue funcionando, solo los endpoints de /api/agents que
+    # necesitan el LLM devuelven 500 explicando qué falta configurar.
+    llm_client: PrometheusLLMClient | None = None
+    if settings.llm_client_id and settings.llm_client_secret:
+        llm_client = PrometheusLLMClient(
+            auth_base_url=settings.llm_auth_base_url,
+            gateway_base_url=settings.llm_gateway_base_url,
+            client_id=settings.llm_client_id,
+            client_secret=settings.llm_client_secret.get_secret_value(),
+        )
+
     @asynccontextmanager
     async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         for server in seller_servers:
             server.should_exit = True
+        if llm_client is not None:
+            await llm_client.aclose()
 
     app = FastAPI(title="agent_commerce dashboard", lifespan=_lifespan)
 
     def _seller_url(protocol: str) -> str:
         return f"http://127.0.0.1:{seller_ports[protocol]}/summarize"
+
+    def _require_llm_client() -> PrometheusLLMClient:
+        if llm_client is None:
+            raise HTTPException(
+                500,
+                "El playground de agentes requiere AGENT_COMMERCE_LLM_CLIENT_ID y "
+                "AGENT_COMMERCE_LLM_CLIENT_SECRET (credenciales de Prometheus) -- ver .env.example.",
+            )
+        return llm_client
+
+    def _agent_catalog(protocol: str) -> InMemoryServiceRegistry:
+        # Mismo servicio real que /api/test-call: el catálogo persistido
+        # (CatalogStore) es metadata administrable, no invocable de verdad
+        # (ver nota del módulo) -- el agente del playground busca/paga
+        # exactamente el mismo text-summarizer real que "Probar comprador".
+        listing = ServiceListing(
+            id="text-summarizer",
+            name="Text Summarizer",
+            description="Resume un texto a N oraciones clave por extracción de frecuencia de palabras.",
+            price_usd="$0.001",
+            capability_tags=["summarize", "text", "research", "nlp"],
+            method="POST",
+            url=_seller_url(protocol),  # type: ignore[arg-type]
+            protocols=[protocol],
+        )
+        return InMemoryServiceRegistry([listing])
 
     app.include_router(auth_router)
 
@@ -339,6 +465,161 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                 "settlement_id": receipt.settlement_id,
             },
         }
+
+    @api.get("/agents/llm-models")
+    async def api_llm_models() -> dict[str, Any]:
+        client = _require_llm_client()
+        try:
+            models = await client.list_models()
+        except LLMClientError as exc:
+            raise HTTPException(502, f"No se pudo listar los modelos de Prometheus: {exc}") from exc
+        return {"models": models}
+
+    @api.post("/agents", status_code=201)
+    async def api_create_agent(
+        payload: CreateAgentRequest,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if payload.protocol not in protocols:
+            raise HTTPException(400, f"Protocolo desconocido: {payload.protocol}")
+        store = SqlAgentStore(db)
+        agent = store.create_agent(
+            owner_user_id=current_user.id,
+            name=payload.name,
+            instructions=payload.instructions,
+            llm_model=payload.llm_model,
+            protocol=payload.protocol,
+            spend_limit_usd=payload.spend_limit_usd,
+        )
+        return _agent_to_dict(agent)
+
+    @api.get("/agents")
+    async def api_list_agents(
+        current_user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)
+    ) -> list[dict[str, Any]]:
+        store = SqlAgentStore(db)
+        return [_agent_to_dict(a) for a in store.list_agents(owner_user_id=current_user.id)]
+
+    @api.delete("/agents/{agent_id}")
+    async def api_delete_agent(
+        agent_id: int, current_user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
+        store = SqlAgentStore(db)
+        _get_owned_agent(store, agent_id, current_user.id)
+        store.delete_agent(agent_id)
+        return {"deleted": True, "id": agent_id}
+
+    @api.post("/agents/{agent_id}/conversations", status_code=201)
+    async def api_create_conversation(
+        agent_id: int,
+        payload: CreateConversationRequest,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        store = SqlAgentStore(db)
+        agent = _get_owned_agent(store, agent_id, current_user.id)
+        conversation = store.create_conversation(agent_id=agent.id, title=payload.title)
+        return _conversation_to_dict(conversation)
+
+    @api.get("/agents/{agent_id}/conversations")
+    async def api_list_conversations(
+        agent_id: int, current_user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)
+    ) -> list[dict[str, Any]]:
+        store = SqlAgentStore(db)
+        agent = _get_owned_agent(store, agent_id, current_user.id)
+        return [_conversation_to_dict(c) for c in store.list_conversations(agent.id)]
+
+    @api.get("/agents/{agent_id}/conversations/{conversation_id}/messages")
+    async def api_list_messages(
+        agent_id: int,
+        conversation_id: int,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> list[dict[str, Any]]:
+        store = SqlAgentStore(db)
+        agent = _get_owned_agent(store, agent_id, current_user.id)
+        conversation = _get_owned_conversation(store, conversation_id, agent)
+        return [_message_to_dict(m) for m in store.list_messages(conversation.id)]
+
+    @api.post("/agents/{agent_id}/conversations/{conversation_id}/messages", status_code=201)
+    async def api_create_message(
+        agent_id: int,
+        conversation_id: int,
+        payload: CreateMessageRequest,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        store = SqlAgentStore(db)
+        agent = _get_owned_agent(store, agent_id, current_user.id)
+        conversation = _get_owned_conversation(store, conversation_id, agent)
+        client = _require_llm_client()
+
+        prior_messages = store.list_messages(conversation.id)
+        store.add_message(conversation_id=conversation.id, role="user", content=payload.content)
+        prompt = _build_prompt_with_history(prior_messages, payload.content)
+
+        buyer_signer = buyer_signers[agent.protocol]
+        async with PayingAgent(
+            protocol=protocols[agent.protocol], signer=buyer_signer, catalog=_agent_catalog(agent.protocol)
+        ) as paying_agent:
+            loop = AgentLoop(
+                llm=client,
+                paying_agent=paying_agent,
+                model=agent.llm_model,
+                spend_limit_usd=agent.spend_limit_usd,
+                extra_instructions=agent.instructions,
+            )
+            try:
+                result = await loop.run(prompt)
+            except AgentLoopError as exc:
+                agent_message = store.add_message(
+                    conversation_id=conversation.id,
+                    role="agent",
+                    content=f"El agente no pudo completar la respuesta: {exc}",
+                )
+                return _message_to_dict(agent_message)
+
+        # Cada `call_service` exitoso de la traza es un pago real -- se
+        # registra en la misma tabla `ledger_entries` de siempre (RM-13),
+        # igual que ya hace /api/test-call, sin contabilidad duplicada.
+        ledger = SqlLedgerStore(db)
+        for step in result.trace:
+            if step.action != "call_service" or not isinstance(step.observation, dict):
+                continue
+            observation = step.observation
+            if "error" in observation:
+                continue
+            price_paid = observation.get("price_paid_usd")
+            ledger.record(
+                protocol=agent.protocol,
+                capability=str(step.action_input.get("capability", "")),
+                service_id=str(observation.get("service_id", "?")),
+                payer=buyer_signer.address,
+                pay_to=seller_signers[agent.protocol].address,
+                amount_usd=Decimal(price_paid) if price_paid else Decimal(0),
+                settlement_id=str(observation.get("settlement_id") or ""),
+                status="ok",
+            )
+
+        trace_dicts = [
+            {
+                "turn": step.turn,
+                "thought": step.thought,
+                "action": step.action,
+                "action_input": step.action_input,
+                "observation": step.observation,
+            }
+            for step in result.trace
+        ]
+        agent_message = store.add_message(
+            conversation_id=conversation.id,
+            role="agent",
+            content=result.answer,
+            trace=trace_dicts,
+            total_spent_usd=result.total_spent_usd,
+        )
+        return _message_to_dict(agent_message)
 
     app.include_router(api)
     return app
