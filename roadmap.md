@@ -11,7 +11,7 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-03](docs/roadmap.md#rm-03) | Catálogo + agentes comprador/vendedor | ✅ Hecho | `ServiceRegistry`, `PayingAgent`, ejemplos, demo agente-a-agente |
 | [RM-04](docs/roadmap.md#rm-04) | CLI | ✅ Hecho | `agent-commerce demo/call/serve-example/catalog/dashboard/create-admin` |
 | [RM-05](docs/roadmap.md#rm-05) | Análisis del modelo de negocio | ✅ Hecho | `docs/business_model_analysis.md` |
-| [RM-06](docs/roadmap.md#rm-06) | Wallet Circle (custodia real) | 🟡 Parcial | Implementado, sin verificar contra credenciales reales de Circle |
+| [RM-06](docs/roadmap.md#rm-06) | Wallet Circle (custodia real) | 🟡 Parcial | API verificada contra el SDK real (métodos y entity_secret_ciphertext corregidos); falta probar con una cuenta Circle viva |
 | [RM-07](docs/roadmap.md#rm-07) | Backend del dashboard | ✅ Hecho | FastAPI + Postgres/SQLAlchemy/Alembic + auth JWT |
 | [RM-08](docs/roadmap.md#rm-08) | Frontend del dashboard | ✅ Hecho | React 19 + Vite + Tailwind + TanStack Query |
 | [RM-09](docs/roadmap.md#rm-09) | Docker Compose | 🟡 Parcial | Escrito y revisado; build no se pudo ejecutar en este sandbox (sin red a registries) |
