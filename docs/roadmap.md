@@ -394,3 +394,24 @@ que configura el backend `circle` solo vía la API del dashboard -- sin ninguna 
 mockeando únicamente las llamadas de red del SDK de Circle con firmas EIP-712/EIP-191
 criptográficamente válidas). Verificado en el navegador que el diálogo enmascara correctamente
 ambos secretos tras el fix.
+
+<a id="rm-20"></a>
+
+## RM-20 — Rebranding del dashboard a "Mercatus"
+**Estado:** ⬜ Backlog
+
+Hoy el dashboard se identifica en todos lados como "agent_commerce" (nombre técnico del repo/
+paquete Python), pero el proyecto/producto de cara al usuario se llama **"Mercatus"**. Homologar:
+
+- `frontend/index.html`: `<title>` (hoy "agent_commerce · dashboard").
+- `frontend/src/components/layout/Sidebar.tsx`: el nombre mostrado junto al logo en el sidebar
+  (hoy "agent_commerce", línea 32) y el logo/ícono en sí si el nuevo logo de Mercatus difiere del
+  actual.
+- `frontend/public/favicon.svg` (y su referencia en `index.html`): reemplazar por el favicon de
+  Mercatus.
+
+Pendiente antes de codear: el usuario tiene que proveer el logo/favicon real de Mercatus (archivo
+de imagen o especificación de diseño) -- no hay que inventar un logo. El nombre interno del paquete
+Python (`agent_commerce`), del repo, y las referencias en código/tests/docs técnicos NO se tocan en
+este ítem (sería un rename de paquete, cambio mucho más invasivo y fuera del alcance de "cara al
+usuario en el dashboard").
