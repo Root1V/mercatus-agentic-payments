@@ -6,6 +6,7 @@ import {
   Package,
   ShoppingCart,
   Store,
+  Zap,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import { cn } from "@/lib/cn";
@@ -24,7 +25,9 @@ export function Sidebar() {
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col bg-sidebar-background text-sidebar-foreground">
       <div className="flex items-center gap-2.5 px-5 py-5">
-        <img src="/favicon.svg" alt="Mercatus" className="size-9 rounded-xl" />
+        <div className="flex size-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-accent">
+          <Zap className="size-5 text-white" />
+        </div>
         <div>
           <p className="text-sm font-semibold leading-tight">Mercatus</p>
           <p className="text-xs text-sidebar-foreground/60">Panel de pruebas x402 · AP2</p>

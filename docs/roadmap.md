@@ -401,18 +401,18 @@ ambos secretos tras el fix.
 **Estado:** ✅ Hecho
 
 El dashboard se identificaba en todos lados como "agent_commerce" (nombre técnico del repo/paquete
-Python) en vez del nombre de cara al usuario, "Mercatus". El usuario no tenía un archivo de logo
-propio, así que se generó un monograma simple ("M" en trazo blanco sobre un cuadrado redondeado con
-degradé `--primary` → `--accent`, `#5048e5` → `#9560f0` -- los mismos tokens de color que ya usa el
-resto del dashboard) como `frontend/public/favicon.svg`, y se referencia con `<img>` desde el
-sidebar y la pantalla de login en vez de duplicar el ícono -- una sola fuente de verdad para el
-logo.
+Python) en vez del nombre de cara al usuario, "Mercatus". Primer intento: como el usuario no tenía
+un archivo de logo propio, se generó un monograma ("M" en trazo blanco sobre un cuadrado redondeado
+con degradé `--primary` → `--accent`) como `favicon.svg` nuevo, referenciado con `<img>` desde el
+sidebar y el login. El usuario lo vio en vivo y no le gustó ("el nuevo logo esta feo") -- se
+revirtió el ícono al `Zap` de lucide en el mismo cuadrado con degradé que ya se usaba antes (y se
+restauró el `favicon.svg` original), conservando únicamente el cambio de nombre/texto.
 
 Cambios, todos en `frontend/` (de cara al usuario, sin tocar nombres internos):
 - `index.html`: `<title>` → "Mercatus · dashboard".
-- `components/layout/Sidebar.tsx`: nombre → "Mercatus", ícono `Zap` de lucide reemplazado por el
-  favicon.
-- `pages/LoginPage.tsx`: mismo cambio de nombre + logo en la tarjeta de login.
+- `components/layout/Sidebar.tsx` / `pages/LoginPage.tsx`: nombre → "Mercatus"; el ícono/logo
+  (cuadrado con degradé `primary`→`accent` + `Zap`) y el `favicon.svg` quedan igual que antes del
+  rebranding -- solo cambió el texto, no el símbolo.
 - `pages/CatalogPage.tsx`: el valor y el placeholder por defecto de "Proveedor" al crear un listing
   pasan de "agent_commerce demo" a "Mercatus demo" (es texto de UI, no un default de negocio).
 

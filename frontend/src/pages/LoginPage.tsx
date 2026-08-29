@@ -1,5 +1,6 @@
 import { type FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Zap } from "lucide-react";
 import { useLogin } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,7 +25,9 @@ export function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-secondary/40 p-4">
       <Card className="w-full max-w-sm">
         <CardHeader className="items-center text-center">
-          <img src="/favicon.svg" alt="Mercatus" className="mb-2 size-11 rounded-xl" />
+          <div className="mb-2 flex size-11 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-accent">
+            <Zap className="size-5 text-white" />
+          </div>
           <CardTitle className="text-lg">Mercatus</CardTitle>
           <CardDescription>Panel de pruebas x402 · AP2</CardDescription>
         </CardHeader>
