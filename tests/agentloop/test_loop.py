@@ -12,16 +12,22 @@ from agent_commerce.client.paying_agent import ServiceCallResult
 
 
 class FakeLLM:
-    """Devuelve las respuestas dadas, una por cada llamada a `chat_completion`."""
+    """Devuelve las respuestas dadas, una por cada llamada a `chat_completion`.
 
-    def __init__(self, responses: list[str]) -> None:
+    Cada item de `responses` es o bien el texto de `content` directamente, o
+    un dict de overrides del mensaje completo (p. ej. `{"content": "",
+    "reasoning_content": "..."}` para simular un modelo "razonador" de
+    llama.cpp que deja `content` vacío)."""
+
+    def __init__(self, responses: list[str | dict[str, Any]]) -> None:
         self._responses = iter(responses)
         self.calls: list[list[dict[str, str]]] = []
 
     async def chat_completion(self, *, model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
         self.calls.append(messages)
-        content = next(self._responses)
-        return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+        item = next(self._responses)
+        message = {"role": "assistant", "content": item} if isinstance(item, str) else {"role": "assistant", **item}
+        return {"choices": [{"message": message}]}
 
 
 class FakePayingAgent:
@@ -181,6 +187,47 @@ async def test_invalid_json_is_retried_once_then_succeeds() -> None:
 
     assert result.answer == "recovered"
     assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_empty_content_with_no_reasoning_gets_explicit_correction() -> None:
+    """Un modelo "razonador" (llama.cpp, p. ej. gpt-oss) puede dejar `content`
+    vacío -- probado a mano contra un gpt-oss real que un mensaje correctivo
+    explícito ("escribilo como tu mensaje visible") sí logra que el
+    siguiente intento sea JSON válido, a diferencia del mensaje genérico de
+    "no es JSON válido"."""
+    llm = FakeLLM([{"content": ""}, _final_answer_json("recovered")])
+    loop = AgentLoop(llm=llm, paying_agent=FakePayingAgent([]), model="test-model")
+
+    result = await loop.run("hi")
+
+    assert result.answer == "recovered"
+    correction_message = llm.calls[1][-1]["content"]
+    assert "vino vacía" in correction_message
+    assert "mensaje visible" in correction_message
+
+
+@pytest.mark.asyncio
+async def test_empty_content_falls_back_to_reasoning_content_text() -> None:
+    """Si `content` viene vacío pero `reasoning_content` no, se usa ese texto
+    para el intento de parseo -- no lo mismo que dejarlo vacío del todo, aunque
+    en la práctica el razonamiento en prosa tampoco sea JSON válido."""
+    llm = FakeLLM(
+        [
+            {"content": "", "reasoning_content": "I should call final_answer but forgot to."},
+            _final_answer_json("recovered"),
+        ]
+    )
+    loop = AgentLoop(llm=llm, paying_agent=FakePayingAgent([]), model="test-model")
+
+    result = await loop.run("hi")
+
+    assert result.answer == "recovered"
+    # El segundo request debe reflejar el fallback (el texto de reasoning_content
+    # aparece como la respuesta previa del asistente), no el mensaje de "vacía".
+    assert any("forgot to" in m["content"] for m in llm.calls[1])
+    correction_message = llm.calls[1][-1]["content"]
+    assert "vino vacía" not in correction_message
 
 
 @pytest.mark.asyncio
