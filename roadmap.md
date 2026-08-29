@@ -23,3 +23,4 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-15](docs/roadmap.md#rm-15) | Frontend del playground | ✅ Hecho | Chat + panel de traza (pensamiento, tool, pago, respuesta) |
 | [RM-16](docs/roadmap.md#rm-16) | Playground: producción | ⬜ Backlog | Streaming, manejo de fallos visible, docs de despliegue de Prometheus |
 | [RM-17](docs/roadmap.md#rm-17) | Configurar LLM desde el dashboard | ✅ Hecho | Conectar Prometheus (URLs, credenciales, modelos habilitados) sin editar `.env` |
+| [RM-18](docs/roadmap.md#rm-18) | Otros rieles de pago (tarjetas, Apple Pay, banco propio) | ⬜ Backlog | Visa/Mastercard, Apple Pay, e integración con un banco propio (p. ej. AIBank) definiendo nosotros el contrato que debe exponer |

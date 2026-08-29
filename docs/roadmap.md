@@ -296,3 +296,38 @@ dashboard), apareció la lista de modelos disponibles, se restringió a uno solo
 modelo del diálogo "Nuevo agente" mostró exactamente ese único modelo -- confirmando el filtro de
 `allowed_models` en vivo. 4 tests del adaptador SQL + 5 tests de la API nuevos (mock de
 auth-service/gateway como servidor real, mismo patrón que RM-14).
+
+<a id="rm-18"></a>
+
+## RM-18 — Otros rieles de pago (tarjetas, Apple Pay, banco propio)
+**Estado:** ⬜ Backlog
+
+Hoy el framework solo liquida sobre rieles cripto (x402 directo, AP2 delegando en x402) vía el
+puerto `WalletSigner` (`payments/wallets/`), diseñado específicamente alrededor de firma
+EIP-712/EIP-191 (EVM). Agregar tarjetas (Visa/Mastercard), Apple Pay, o un banco propio (p. ej.
+"AIBank") **no encaja como un `WalletSigner` más** -- son rieles con un modelo de
+autorización/liquidación totalmente distinto (auth+capture, no una firma que habilita una
+transferencia on-chain). Van a necesitar, como mínimo, un nuevo `PaymentProtocol` (o un puerto
+nuevo por encima de `WalletSigner`/`PaymentProtocol`) que negocie/autorice/liquide con la forma de
+cada riel -- decisión de diseño para cuando se encare esta fase, no asumida de antemano.
+
+Por riel:
+
+- **Visa / Mastercard**: en la práctica casi ninguna empresa integra directo contra la red -- se
+  hace vía un procesador/adquirente (Stripe, Adyen, etc.) o las APIs propias de cada red (Visa
+  Direct, Mastercard Send, ambas orientadas a *payouts*, no exactamente al caso de "agente le paga
+  a un servicio"). Antes de codear, investigar cuál de esos caminos es real para el caso de uso
+  antes de elegir uno.
+- **Apple Pay**: es una capa de wallet/tokenización (PassKit, Apple Pay on the Web), no un riel de
+  liquidación en sí mismo -- igual necesita un procesador de pagos por detrás, más registro de
+  merchant y verificación de dominio ante Apple.
+- **Banco propio (AIBank u otro)**: acá el trabajo es nuestro -- diseñar y documentar el contrato
+  que ese banco tendría que exponer para integrarse (siguiendo el mismo espíritu que x402/AP2 son
+  contratos abiertos que cualquiera puede implementar). Como mínimo definir: modelo de auth
+  (¿OAuth2 client_credentials como Prometheus? ¿mTLS? ¿API key?), endpoints de autorización/captura/
+  consulta/reembolso de un pago, idempotencia, y cómo se notifica la liquidación final (webhook vs.
+  polling) -- básicamente un mini-spec de protocolo de pago, no solo un adaptador de wallet.
+
+Sin credenciales de ninguno de estos proveedores todavía -- como con Circle (RM-06) y Prometheus
+(RM-11), cualquier verificación real de este trabajo va a necesitar que el usuario provea sus
+propias credenciales de sandbox y autorice cada paso explícitamente.
