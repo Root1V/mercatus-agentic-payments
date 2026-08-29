@@ -1,4 +1,5 @@
-"""Puertos de persistencia del dashboard: `LedgerStore`, `CatalogStore` y `AgentStore`.
+"""Puertos de persistencia del dashboard: `LedgerStore`, `CatalogStore`, `AgentStore` y
+`LlmSettingsStore`.
 
 Mismo estilo que `payments/wallets/base.py`/`payments/protocols/base.py`:
 `dashboard/app.py` programa solo contra estos `Protocol`, nunca contra
@@ -153,3 +154,34 @@ class AgentStore(Protocol):
     ) -> AgentMessage: ...
 
     def list_messages(self, conversation_id: int) -> list[AgentMessage]: ...
+
+
+@dataclass
+class LlmSettings:
+    auth_base_url: str
+    gateway_base_url: str
+    client_id: str
+    client_secret: str
+    allowed_models: list[str]
+    updated_at: datetime
+
+
+@runtime_checkable
+class LlmSettingsStore(Protocol):
+    """Conexión a Prometheus configurada desde el dashboard (fila única) en
+    vez de variables de entorno del servidor -- ver `LlmSettingsModel`."""
+
+    def get(self) -> LlmSettings | None: ...
+
+    def upsert(
+        self,
+        *,
+        auth_base_url: str,
+        gateway_base_url: str,
+        client_id: str,
+        client_secret: str | None,
+        allowed_models: list[str],
+    ) -> LlmSettings:
+        """Crea o actualiza la fila única. `client_secret=None` conserva el
+        secreto ya guardado (para poder editar el resto sin reescribirlo)."""
+        ...

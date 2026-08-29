@@ -1,16 +1,19 @@
 import { type FormEvent, useState } from "react";
-import { Bot, Loader2, Plus, Send, Trash2 } from "lucide-react";
+import { Bot, Loader2, Plus, Send, Settings as SettingsIcon, Trash2 } from "lucide-react";
 import {
   useAgents,
+  useAllLlmModels,
   useConversations,
   useCreateAgent,
   useCreateConversation,
   useDeleteAgent,
   useLlmModels,
+  useLlmSettings,
   useMessages,
   useSendMessage,
+  useUpdateLlmSettings,
 } from "@/hooks/useAgents";
-import type { CreateAgentInput } from "@/types/agent";
+import type { CreateAgentInput, LlmSettings } from "@/types/agent";
 import type { ProtocolName } from "@/types/protocol";
 import { formatUsd } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -22,7 +25,14 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Dialog, DialogCloseButton, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogCloseButton,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ProtocolBadge } from "@/components/dashboard/ProtocolBadge";
 import { TraceStepView } from "@/components/dashboard/TraceStepView";
@@ -43,6 +53,7 @@ export function AgentPlaygroundPage() {
 
   const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null);
   const [open, setOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [form, setForm] = useState<CreateAgentInput>(EMPTY_FORM);
   const [deletingId, setDeletingId] = useState<number | undefined>();
 
@@ -82,9 +93,14 @@ export function AgentPlaygroundPage() {
         <Card className="flex h-[calc(100vh-9rem)] flex-col">
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle>Mis agentes</CardTitle>
-            <Button size="sm" onClick={() => setOpen(true)}>
-              <Plus className="size-4" /> Crear
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
+                <SettingsIcon className="size-4" />
+              </Button>
+              <Button size="sm" onClick={() => setOpen(true)}>
+                <Plus className="size-4" /> Crear
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="flex-1 overflow-y-auto">
             {agentsLoading || !agents ? (
@@ -238,7 +254,155 @@ export function AgentPlaygroundPage() {
           </DialogFooter>
         </form>
       </Dialog>
+
+      <LlmSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </AppShell>
+  );
+}
+
+function LlmSettingsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { data: settings, isLoading, isError } = useLlmSettings();
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogCloseButton onClick={() => onOpenChange(false)} />
+      <DialogHeader>
+        <DialogTitle>Configurar LLM (Prometheus)</DialogTitle>
+        <DialogDescription>
+          Conectá tu Prometheus local sin tocar el .env del servidor -- pedile estos datos a
+          quien lo administra.
+        </DialogDescription>
+      </DialogHeader>
+      {open && isLoading && <Skeleton className="h-48" />}
+      {open && isError && (
+        <p className="text-sm text-destructive">No se pudo cargar la configuración actual.</p>
+      )}
+      {open && !isLoading && !isError && (
+        // `key` fuerza un remount (y por lo tanto un useState fresco) cada vez
+        // que cambian los datos guardados -- así el form siempre arranca con
+        // los valores reales, no con lo que quedó de una edición anterior.
+        <LlmSettingsForm
+          key={settings?.updated_at ?? "unconfigured"}
+          settings={settings}
+          onClose={() => onOpenChange(false)}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function LlmSettingsForm({
+  settings,
+  onClose,
+}: {
+  settings: LlmSettings | undefined;
+  onClose: () => void;
+}) {
+  const updateSettings = useUpdateLlmSettings();
+  const allModels = useAllLlmModels(!!settings?.configured);
+  const [form, setForm] = useState({
+    auth_base_url: settings?.auth_base_url ?? "",
+    gateway_base_url: settings?.gateway_base_url ?? "",
+    client_id: settings?.client_id ?? "",
+    client_secret: "",
+    allowed_models: settings?.allowed_models.join(", ") ?? "",
+  });
+
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    updateSettings.mutate({
+      auth_base_url: form.auth_base_url,
+      gateway_base_url: form.gateway_base_url,
+      client_id: form.client_id,
+      client_secret: form.client_secret ? form.client_secret : undefined,
+      allowed_models: form.allowed_models
+        .split(",")
+        .map((m) => m.trim())
+        .filter(Boolean),
+    });
+  }
+
+  return (
+    <form className="flex flex-col gap-3" onSubmit={handleSubmit}>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label>URL del auth-service</Label>
+          <Input
+            required
+            placeholder="http://localhost:9000"
+            value={form.auth_base_url}
+            onChange={(e) => setForm({ ...form, auth_base_url: e.target.value })}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label>URL del gateway</Label>
+          <Input
+            required
+            placeholder="http://localhost:8020"
+            value={form.gateway_base_url}
+            onChange={(e) => setForm({ ...form, gateway_base_url: e.target.value })}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>Client ID</Label>
+        <Input
+          required
+          value={form.client_id}
+          onChange={(e) => setForm({ ...form, client_id: e.target.value })}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>{settings?.has_secret ? "Client secret (dejar vacío para no cambiarlo)" : "Client secret"}</Label>
+        <Input
+          type="password"
+          required={!settings?.has_secret}
+          placeholder={settings?.has_secret ? "••••••••" : ""}
+          value={form.client_secret}
+          onChange={(e) => setForm({ ...form, client_secret: e.target.value })}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>Modelos habilitados (separados por coma -- vacío = todos)</Label>
+        <Input
+          placeholder="qwen2.5-7b-instruct, llama-3.1-8b"
+          value={form.allowed_models}
+          onChange={(e) => setForm({ ...form, allowed_models: e.target.value })}
+        />
+        {allModels.isSuccess && (
+          <p className="text-xs text-muted-foreground">
+            Disponibles en Prometheus: {allModels.data.map((m) => m.id).join(", ") || "ninguno"}
+          </p>
+        )}
+      </div>
+
+      {updateSettings.isError && (
+        <p className="text-sm text-destructive">
+          {(updateSettings.error as Error)?.message ?? "No se pudo guardar la configuración."}
+        </p>
+      )}
+      {updateSettings.isSuccess && (
+        <p className="text-sm text-success">Guardado -- ya podés elegir el modelo al crear un agente.</p>
+      )}
+
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onClose}>
+          Cerrar
+        </Button>
+        <Button type="submit" disabled={updateSettings.isPending}>
+          {updateSettings.isPending ? "Guardando…" : "Guardar conexión"}
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }
 

@@ -6,10 +6,12 @@ import {
   fetchAgents,
   fetchConversations,
   fetchLlmModels,
+  fetchLlmSettings,
   fetchMessages,
   sendMessage,
+  updateLlmSettings,
 } from "@/api/agents";
-import type { CreateAgentInput } from "@/types/agent";
+import type { CreateAgentInput, UpdateLlmSettingsInput } from "@/types/agent";
 
 const AGENTS_KEY = ["agents"];
 
@@ -34,10 +36,38 @@ export function useDeleteAgent() {
 }
 
 export function useLlmModels() {
-  // Sin reintento: un 500 acá significa que Prometheus no está configurado
-  // (variables de entorno faltantes), no una falla transitoria de red --
-  // reintentar nunca lo va a arreglar, solo demora mostrar el error.
-  return useQuery({ queryKey: ["llm-models"], queryFn: fetchLlmModels, retry: false });
+  // Sin reintento: un 500 acá significa que el LLM no está configurado
+  // (ni en la DB ni por variables de entorno), no una falla transitoria de
+  // red -- reintentar nunca lo va a arreglar, solo demora mostrar el error.
+  return useQuery({ queryKey: ["llm-models"], queryFn: () => fetchLlmModels(), retry: false });
+}
+
+// Usado solo por el diálogo de configuración: la lista SIN filtrar por
+// `allowed_models`, para poder elegir cuáles habilitar. Deshabilitada salvo
+// que se pida explícitamente (`enabled`) -- no tiene sentido pedirla si la
+// conexión todavía no está guardada.
+export function useAllLlmModels(enabled: boolean) {
+  return useQuery({
+    queryKey: ["llm-models", "all"],
+    queryFn: () => fetchLlmModels({ includeAll: true }),
+    retry: false,
+    enabled,
+  });
+}
+
+export function useLlmSettings() {
+  return useQuery({ queryKey: ["llm-settings"], queryFn: fetchLlmSettings });
+}
+
+export function useUpdateLlmSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: UpdateLlmSettingsInput) => updateLlmSettings(input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["llm-settings"] });
+      queryClient.invalidateQueries({ queryKey: ["llm-models"] });
+    },
+  });
 }
 
 export function useConversations(agentId: number | null) {
