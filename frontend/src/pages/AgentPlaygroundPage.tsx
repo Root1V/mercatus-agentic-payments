@@ -501,13 +501,25 @@ function ChatPanel({ agentId, spendLimitUsd }: { agentId: number; spendLimitUsd:
 
   const noConversationYet = conversations.isSuccess && conversations.data.length === 0;
 
+  const totalConversationSpend = (messages.data ?? []).reduce(
+    (sum, m) => sum + (m.total_spent_usd ? Number(m.total_spent_usd) : 0),
+    0,
+  );
+
   return (
     <Card className="flex h-[calc(100vh-9rem)] flex-col">
       <CardHeader className="flex-row items-center justify-between space-y-0 border-b border-border">
         <CardTitle>Chat</CardTitle>
-        {spendLimitUsd && (
-          <span className="text-xs text-muted-foreground">Límite de gasto: {formatUsd(spendLimitUsd)}</span>
-        )}
+        <div className="flex flex-col items-end gap-0.5 text-xs">
+          {spendLimitUsd && (
+            <span className="text-muted-foreground">Límite por mensaje: {formatUsd(spendLimitUsd)}</span>
+          )}
+          {totalConversationSpend > 0 && (
+            <span className="font-medium text-success">
+              Gastado en esta conversación: {formatUsd(totalConversationSpend)}
+            </span>
+          )}
+        </div>
       </CardHeader>
 
       <CardContent className="flex flex-1 flex-col gap-3 overflow-y-auto pt-4">
