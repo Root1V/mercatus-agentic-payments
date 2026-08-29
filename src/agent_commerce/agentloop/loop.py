@@ -49,7 +49,10 @@ search_catalog>", "payload": {<JSON body for the service, or {} if none needed>}
 SPENDS REAL MONEY up to the service's listed price_usd -- only call it when it's actually \
 needed to answer the request.
 - final_answer: action_input = {"answer": "<your final answer to the user, in plain text>"}. \
-Use this as soon as you have enough information -- do not call services you don't need.
+Use this as soon as you have enough information -- do not call services you don't need. Keep \
+"answer" reasonably short: if a service already returned the result in an observation, refer to \
+it briefly instead of copying it back character-for-character -- a very long value here is more \
+likely to break the JSON you're producing.
 
 Respond with the JSON object now."""
 
