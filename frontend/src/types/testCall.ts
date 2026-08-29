@@ -14,6 +14,7 @@ export interface PaymentReceiptDTO {
   pay_to: string;
   amount_usd: string;
   settlement_id: string;
+  wallet_backend: "local" | "circle" | null;
 }
 
 export interface TestCallResult {

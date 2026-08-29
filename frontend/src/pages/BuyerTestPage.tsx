@@ -151,6 +151,11 @@ export function BuyerTestPage() {
                   <div>
                     <p className="mb-1 flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                       Recibo de pago <ProtocolBadge protocol={testCall.data.receipt.protocol} />
+                      {testCall.data.receipt.wallet_backend && (
+                        <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-medium normal-case text-secondary-foreground">
+                          Firmado con {testCall.data.receipt.wallet_backend === "circle" ? "Circle" : "wallet local"}
+                        </span>
+                      )}
                     </p>
                     <dl className="grid grid-cols-1 gap-1.5 rounded-lg border border-border p-3 text-xs">
                       <Row label="Red" value={testCall.data.receipt.network} copyValue={testCall.data.receipt.network} mono />

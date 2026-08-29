@@ -649,6 +649,10 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                 "pay_to": pay_to,
                 "amount_usd": str(amount_usd),
                 "settlement_id": receipt.settlement_id,
+                # RM-19: con qué backend de wallet firmó el comprador -- así
+                # se ve en el recibo, no hay que adivinarlo comparando
+                # direcciones a mano.
+                "wallet_backend": wallet_signer_holder.key[0] if wallet_signer_holder.key else None,
             },
         }
 

@@ -253,6 +253,18 @@ def test_test_call_pays_with_circle_backed_buyer(dashboard_client: TestClient) -
     assert response.status_code == 200
     body = response.json()
     assert body["receipt"]["payer"].lower() == _CIRCLE_ADDRESS.lower()
+    assert body["receipt"]["wallet_backend"] == "circle"
 
     ledger = dashboard_client.get("/api/ledger", headers=headers).json()
     assert ledger[0]["payer"].lower() == _CIRCLE_ADDRESS.lower()
+
+
+def test_test_call_receipt_reports_local_backend_by_default(dashboard_client: TestClient) -> None:
+    headers = _auth_headers(dashboard_client)
+    response = dashboard_client.post(
+        "/api/test-call",
+        json={"protocol": "x402", "text": "Frase uno. Frase dos. Frase tres.", "max_sentences": 1},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["receipt"]["wallet_backend"] == "local"
