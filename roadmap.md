@@ -14,7 +14,7 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-06](docs/roadmap.md#rm-06) | Wallet Circle (custodia real) | ✅ Hecho | Verificado de punta a punta contra una cuenta Circle sandbox real (wallets creadas, firma EIP-712/EIP-191 probada) |
 | [RM-07](docs/roadmap.md#rm-07) | Backend del dashboard | ✅ Hecho | FastAPI + Postgres/SQLAlchemy/Alembic + auth JWT |
 | [RM-08](docs/roadmap.md#rm-08) | Frontend del dashboard | ✅ Hecho | React 19 + Vite + Tailwind + TanStack Query |
-| [RM-09](docs/roadmap.md#rm-09) | Docker Compose | 🟡 Parcial | Escrito y revisado; build no se pudo ejecutar en este sandbox (sin red a registries) |
+| [RM-09](docs/roadmap.md#rm-09) | Docker Compose | ✅ Hecho | Verificado de punta a punta: build, los 3 servicios sanos, persistencia en Postgres, proxy de nginx, pago x402 real |
 | [RM-10](docs/roadmap.md#rm-10) | Edición de catálogo + UX del recibo | ✅ Hecho | Editar/crear servicio con proveedor, botones de copiar en el recibo |
 | [RM-11](docs/roadmap.md#rm-11) | Cliente LLM (Prometheus) | ✅ Hecho | OAuth2 + chat completions contra el gateway local |
 | [RM-12](docs/roadmap.md#rm-12) | Loop del agente (tool-use) | ✅ Hecho | Contrato JSON tipo ReAct (sin function-calling nativo), límite de gasto |

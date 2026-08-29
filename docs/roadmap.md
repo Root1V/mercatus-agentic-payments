@@ -109,12 +109,31 @@ protocolos.
 <a id="rm-09"></a>
 
 ## RM-09 — Docker Compose
-**Estado:** 🟡 Parcial
+**Estado:** ✅ Hecho
 
 `Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml`, `docker/api-entrypoint.sh` escritos y
-revisados a mano (rutas, extras de `uv`, permisos). `docker compose build` no se pudo ejecutar en
-el sandbox de la sesión que lo creó (sin salida de red hacia Docker Hub/ghcr.io, confirmado con
-varios intentos). Pendiente: correr `docker compose up --build` en un entorno con red normal.
+revisados a mano (rutas, extras de `uv`, permisos). Quedó como 🟡 Parcial un buen tiempo porque el
+sandbox que lo escribió no tenía salida de red hacia Docker Hub/ghcr.io -- en esta sesión sí había
+red, así que se verificó de punta a punta:
+
+- `docker compose build`: las dos imágenes (`api`, `frontend`) compilan limpio, multi-stage con
+  `uv`/`npm` como estaba diseñado.
+- `docker compose up -d`: los 3 servicios (`postgres`, `api`, `frontend`) arriba y sanos
+  (`healthcheck` de Postgres y de la API en verde).
+- `docker/api-entrypoint.sh` corrió las 4 migraciones de Alembic contra el Postgres real del
+  compose y sembró el catálogo, antes de levantar uvicorn -- tal cual el diseño.
+- `agent-commerce create-admin` dentro del contenedor `api` + login real + `GET /api/protocols` +
+  un pago x402 de punta a punta (`POST /api/test-call`), liquidado con normalidad.
+- Persistencia real: `docker compose restart api` y el ledger conservó la entrada del pago anterior
+  (Postgres, no memoria).
+- El proxy de nginx del contenedor `frontend` (`location /api/` → `http://api:8000/api/`) se probó
+  *desde dentro de la red del compose* (`docker compose exec frontend wget ... /api/protocols`,
+  sin depender del mapeo de puertos del host) -- devolvió un 401 real de FastAPI, confirmando que
+  nginx enruta correctamente y no hay que configurar CORS en producción.
+- Nota de la sesión: el dashboard nativo (`uv run agent-commerce dashboard`, usado en el resto de
+  este roadmap para desarrollo día a día) y el `frontend` del compose compiten por los puertos
+  8000/5173 del host si corren a la vez -- para probar el compose se paró el proceso nativo, y se
+  restauró después de verificar.
 
 <a id="rm-10"></a>
 
