@@ -131,3 +131,22 @@ class LlmSettingsModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class WalletSettingsModel(Base):
+    """Fila única (singleton, `id=1`) con el backend de wallet del
+    COMPRADOR configurado desde el dashboard (RM-06/RM-19) -- mismo espíritu
+    que `LlmSettingsModel`. Solo afecta al comprador (`/api/test-call` y el
+    playground de agentes); el vendedor de ejemplo sigue con su wallet local
+    fija, definida al levantar el proceso (ver `dashboard/app.py`)."""
+
+    __tablename__ = "wallet_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    backend: Mapped[str] = mapped_column(String(16))  # "local" | "circle"
+    circle_api_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    circle_entity_secret: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    circle_wallet_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

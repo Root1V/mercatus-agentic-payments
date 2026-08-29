@@ -342,3 +342,55 @@ Por riel:
 Sin credenciales de ninguno de estos proveedores todavía -- como con Circle (RM-06) y Prometheus
 (RM-11), cualquier verificación real de este trabajo va a necesitar que el usuario provea sus
 propias credenciales de sandbox y autorice cada paso explícitamente.
+
+<a id="rm-19"></a>
+
+## RM-19 — Configurar wallet del comprador desde el dashboard
+**Estado:** ✅ Hecho
+
+Motivación: RM-06 dejó `CircleWalletSigner` verificado, pero elegir el backend de wallet
+(`local`/`circle`) seguía siendo solo por `AGENT_COMMERCE_WALLET_BACKEND` y las credenciales de
+Circle en el `.env` del servidor -- para poder probar el comprador contra una wallet Circle real
+desde el propio dashboard hacía falta poder cargar esa configuración desde la UI, en caliente, sin
+tocar el entorno del proceso (mismo problema que resolvió RM-17 para el LLM).
+
+Tabla `WalletSettingsModel` (fila única, `id=1`: `backend`, `circle_api_key`,
+`circle_entity_secret`, `circle_wallet_id`) + migración `0004_wallet_settings.py`. Puerto
+`WalletSettingsStore` nuevo en `dashboard/ports.py` (mismo patrón que `LlmSettingsStore`),
+adaptadores `SqlWalletSettingsStore`/`InMemoryWalletSettingsStore`. Endpoints `GET`/
+`PUT /api/admin/wallet-settings` -- el `GET` nunca devuelve `circle_api_key` ni
+`circle_entity_secret` (solo `has_circle_api_key`/`has_circle_entity_secret: bool`), el `PUT` con
+cualquiera de los dos omitido conserva el que ya estaba guardado.
+
+`dashboard/app.py` resuelve el `WalletSigner` del **comprador** de forma perezosa por request
+(`_get_buyer_signer(db)`), cacheado mientras la configuración efectiva no cambie -- mismo mecanismo
+de "holder" que `_get_llm_client` (RM-17). El wallet del **vendedor** se mantiene estático: cada
+protocolo ya corre su propio servidor FastAPI (`uvicorn.Server`) con `pay_to` fijado al construir
+la app, así que cambiarlo en caliente exigiría reiniciar esos servidores -- fuera de alcance de
+esta feature. Si el backend `circle` está seleccionado pero falta alguna credencial,
+`/api/protocols` degrada mostrando `buyer_address: null` en vez de romper todo el endpoint, y
+`/api/test-call`/el playground devuelven un 500 con un mensaje explícito señalando dónde
+configurarlo.
+
+`frontend/src/pages/BuyerTestPage.tsx`: botón "Configurar wallet" junto al título abre un diálogo
+(mismo patrón `LlmSettingsDialog` de RM-17) con backend local/Circle, y para Circle: API key,
+entity secret y wallet ID (los dos primeros con placeholder "dejar vacío para no cambiarlo" una vez
+configurados). `ProtocolCompareCard` muestra "Wallet mal configurada" en vez de una dirección
+inválida cuando el backend Circle está incompleto.
+
+**Incidente de seguridad detectado y corregido durante la implementación**: la primera versión del
+formulario mostraba `circle_api_key` como texto plano (mismo trato que `client_id` de RM-17,
+razonando que era un "identificador"), pero a diferencia de un `client_id` de OAuth2, el API key de
+Circle autentica por sí solo -- es un secreto, no un identificador. Un screenshot tomado durante la
+verificación en vivo expuso el valor real en la conversación. Se corrigió antes de terminar la
+feature: mismo tratamiento que `circle_entity_secret` en todas las capas (adaptadores, serializador
+de la API, formulario del frontend como campo `password` sin prellenar). Se recomendó al usuario
+rotar tanto el API key como el entity secret (este último ya había tenido una exposición similar
+durante RM-06) vía console.circle.com -- no hay rotación por API.
+
+Verificado de punta a punta: 6 tests del adaptador SQL + 8 tests de la API (incluye un test central
+que configura el backend `circle` solo vía la API del dashboard -- sin ninguna variable de entorno
+-- y confirma que un pago x402 real en modo mock efectivamente liquida firmado por esa wallet,
+mockeando únicamente las llamadas de red del SDK de Circle con firmas EIP-712/EIP-191
+criptográficamente válidas). Verificado en el navegador que el diálogo enmascara correctamente
+ambos secretos tras el fix.

@@ -24,3 +24,4 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-16](docs/roadmap.md#rm-16) | Playground: producción | ⬜ Backlog | Streaming, manejo de fallos visible, docs de despliegue de Prometheus |
 | [RM-17](docs/roadmap.md#rm-17) | Configurar LLM desde el dashboard | ✅ Hecho | Conectar Prometheus (URLs, credenciales, modelos habilitados) sin editar `.env` |
 | [RM-18](docs/roadmap.md#rm-18) | Otros rieles de pago (tarjetas, Apple Pay, banco propio) | ⬜ Backlog | Visa/Mastercard, Apple Pay, e integración con un banco propio (p. ej. AIBank) definiendo nosotros el contrato que debe exponer |
+| [RM-19](docs/roadmap.md#rm-19) | Configurar wallet del comprador desde el dashboard | ✅ Hecho | Elegir backend local/Circle (API key, entity secret, wallet ID) desde "Probar comprador", sin editar `.env` ni reiniciar el proceso |
