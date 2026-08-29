@@ -28,7 +28,7 @@ const EMPTY_FORM = {
   price_usd: "$0.001",
   capability_tags: "",
   protocols: ["x402"] as ProtocolName[],
-  provider_name: "agent_commerce demo",
+  provider_name: "Mercatus demo",
 };
 
 function listingToForm(listing: CatalogListing): typeof EMPTY_FORM {
@@ -184,7 +184,7 @@ export function CatalogPage() {
           <Field label="Proveedor">
             <Input
               required
-              placeholder="agent_commerce demo"
+              placeholder="Mercatus demo"
               value={form.provider_name}
               onChange={(e) => setForm({ ...form, provider_name: e.target.value })}
             />

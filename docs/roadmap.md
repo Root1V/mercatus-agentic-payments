@@ -398,20 +398,31 @@ ambos secretos tras el fix.
 <a id="rm-20"></a>
 
 ## RM-20 — Rebranding del dashboard a "Mercatus"
-**Estado:** ⬜ Backlog
+**Estado:** ✅ Hecho
 
-Hoy el dashboard se identifica en todos lados como "agent_commerce" (nombre técnico del repo/
-paquete Python), pero el proyecto/producto de cara al usuario se llama **"Mercatus"**. Homologar:
+El dashboard se identificaba en todos lados como "agent_commerce" (nombre técnico del repo/paquete
+Python) en vez del nombre de cara al usuario, "Mercatus". El usuario no tenía un archivo de logo
+propio, así que se generó un monograma simple ("M" en trazo blanco sobre un cuadrado redondeado con
+degradé `--primary` → `--accent`, `#5048e5` → `#9560f0` -- los mismos tokens de color que ya usa el
+resto del dashboard) como `frontend/public/favicon.svg`, y se referencia con `<img>` desde el
+sidebar y la pantalla de login en vez de duplicar el ícono -- una sola fuente de verdad para el
+logo.
 
-- `frontend/index.html`: `<title>` (hoy "agent_commerce · dashboard").
-- `frontend/src/components/layout/Sidebar.tsx`: el nombre mostrado junto al logo en el sidebar
-  (hoy "agent_commerce", línea 32) y el logo/ícono en sí si el nuevo logo de Mercatus difiere del
-  actual.
-- `frontend/public/favicon.svg` (y su referencia en `index.html`): reemplazar por el favicon de
-  Mercatus.
+Cambios, todos en `frontend/` (de cara al usuario, sin tocar nombres internos):
+- `index.html`: `<title>` → "Mercatus · dashboard".
+- `components/layout/Sidebar.tsx`: nombre → "Mercatus", ícono `Zap` de lucide reemplazado por el
+  favicon.
+- `pages/LoginPage.tsx`: mismo cambio de nombre + logo en la tarjeta de login.
+- `pages/CatalogPage.tsx`: el valor y el placeholder por defecto de "Proveedor" al crear un listing
+  pasan de "agent_commerce demo" a "Mercatus demo" (es texto de UI, no un default de negocio).
 
-Pendiente antes de codear: el usuario tiene que proveer el logo/favicon real de Mercatus (archivo
-de imagen o especificación de diseño) -- no hay que inventar un logo. El nombre interno del paquete
-Python (`agent_commerce`), del repo, y las referencias en código/tests/docs técnicos NO se tocan en
-este ítem (sería un rename de paquete, cambio mucho más invasivo y fuera del alcance de "cara al
-usuario en el dashboard").
+Deliberadamente NO se tocó: el nombre del paquete Python (`agent_commerce`), del repo, la clave de
+`localStorage` (`agent_commerce_token`, cambiarla forzaría relogueo sin ningún beneficio), ni el
+`provider_name`/`merchant_name` por defecto ("agent_commerce demo") que usan
+`catalog/models.py`, `ap2_protocol.py`, `dashboard/app.py`, `db/models.py` y
+`data/catalog.sample.json` -- ese es un default de negocio que viaja dentro de los mandatos AP2 y
+en filas ya sembradas de la base, con un radio de impacto mayor al de un rebranding visual; se
+puede revisar aparte si se quiere.
+
+Verificado en el navegador: título de la pestaña, logo y nombre en el sidebar (autenticado) y en la
+pantalla de login (sin sesión) -- build (`npm run build`) y lint (`npm run lint`) limpios.
