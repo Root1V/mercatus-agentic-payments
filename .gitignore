@@ -9,6 +9,10 @@ __pycache__/
 migrations/*.db
 data/*.db
 
+# Archivo de recuperación del entity secret de Circle (RM-06) -- tan
+# sensible como una clave privada, nunca debe ir al repo.
+secrets/
+
 # Frontend (uv.lock SÍ se commitea; node_modules/dist no)
 frontend/node_modules/
 frontend/dist/
