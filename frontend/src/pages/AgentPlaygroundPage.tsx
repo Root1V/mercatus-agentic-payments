@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from "react";
-import { Bot, Loader2, Plus, Send, Settings as SettingsIcon, Trash2 } from "lucide-react";
+import { Ban, Bot, Loader2, Plus, Send, Settings as SettingsIcon, Trash2, Wallet } from "lucide-react";
 import {
   useAgents,
   useAllLlmModels,
@@ -406,6 +406,26 @@ function LlmSettingsForm({
   );
 }
 
+// Siempre deja explícito si esta respuesta pagó algo o no -- sin esto, un
+// agente que decide responder sin usar la herramienta (por ejemplo, un texto
+// tan corto que no necesita el resumidor pago) se ve idéntico a uno que sí
+// pagó pero no mostró el monto, y no hay forma de saber si se descontó algo.
+function SpendIndicator({ totalSpentUsd }: { totalSpentUsd: string | null }) {
+  const spent = totalSpentUsd ? Number(totalSpentUsd) : 0;
+  if (spent > 0) {
+    return (
+      <p className="flex items-center gap-1.5 px-1 text-xs font-medium text-success">
+        <Wallet className="size-3.5" /> Se pagó {formatUsd(totalSpentUsd as string)} por usar una herramienta
+      </p>
+    );
+  }
+  return (
+    <p className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+      <Ban className="size-3.5" /> No se pagó nada -- el agente respondió sin usar ninguna herramienta
+    </p>
+  );
+}
+
 function ChatPanel({ agentId, spendLimitUsd }: { agentId: number; spendLimitUsd: string | null }) {
   const conversations = useConversations(agentId);
   const createConversation = useCreateConversation(agentId);
@@ -471,11 +491,7 @@ function ChatPanel({ agentId, spendLimitUsd }: { agentId: number; spendLimitUsd:
                   {message.trace.map((step) => (
                     <TraceStepView key={step.turn} step={step} />
                   ))}
-                  {message.total_spent_usd && Number(message.total_spent_usd) > 0 && (
-                    <p className="px-1 text-xs text-muted-foreground">
-                      Total gastado en esta respuesta: {formatUsd(message.total_spent_usd)}
-                    </p>
-                  )}
+                  <SpendIndicator totalSpentUsd={message.total_spent_usd} />
                 </div>
               )}
             </div>

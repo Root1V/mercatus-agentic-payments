@@ -1,4 +1,4 @@
-import { ChevronDown, CircleDollarSign, Search, Wallet } from "lucide-react";
+import { ChevronDown, MessageCircle, Search, Wallet } from "lucide-react";
 import type { TraceStep } from "@/types/agent";
 import { truncateAddress } from "@/lib/format";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -9,10 +9,12 @@ const ACTION_LABEL: Record<TraceStep["action"], string> = {
   final_answer: "Respuesta final",
 };
 
+// `final_answer` NUNCA implica pago (a diferencia de `call_service`) --
+// un ícono de plata acá confundía: parecía que cualquier turno costaba algo.
 const ACTION_ICON: Record<TraceStep["action"], typeof Search> = {
   search_catalog: Search,
   call_service: Wallet,
-  final_answer: CircleDollarSign,
+  final_answer: MessageCircle,
 };
 
 interface CallServiceObservation {
