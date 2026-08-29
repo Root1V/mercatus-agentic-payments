@@ -53,12 +53,12 @@ sin acoplamiento a un proveedor.
 <a id="rm-06"></a>
 
 ## RM-06 — Wallet Circle (custodia real)
-**Estado:** 🟡 Parcial
+**Estado:** ✅ Hecho
 
 `payments/wallets/circle_wallet.py`: adaptador opcional (`agent-commerce[circle]`), import
-perezoso. La forma de la API SÍ se verificó -- instalando el extra e inspeccionando el código
-fuente real de `circle-developer-controlled-wallets` 9.6.0 (no hace falta credenciales para
-eso, solo el paquete) se encontraron y corrigieron tres suposiciones erróneas: la clase es
+perezoso. La forma de la API se verificó primero instalando el extra e inspeccionando el código
+fuente real de `circle-developer-controlled-wallets` 9.6.0 (no hace falta credenciales para eso,
+solo el paquete): se encontraron y corrigieron tres suposiciones erróneas -- la clase es
 `SigningApi` (no `SignatureApi`), los métodos son `sign_typed_data`/`sign_message` sin sufijo
 `_for_developer` (no existe en esta versión), y el request de EIP-712 es `SignTypedDataRequest`
 (no `SignTypedDataForDeveloperRequest`, que no existe). También se implementó `sign_message`
@@ -70,11 +70,22 @@ autenticar una llamada real.
 
 Verificado con tests (`tests/payments/wallets/test_circle_wallet.py`) que construyen instancias
 reales de los modelos pydantic del SDK (`EOAWallet`, `SignatureResponse`, etc., no dobles
-sueltos) y mockean solo las llamadas de red -- si el SDK real cambia de forma, estos tests
-rompen en vez de pasar en silencio. Lo único que sigue sin probarse es la llamada de red real
-contra una cuenta Circle viva (API key + entity secret + wallet_id reales) -- eso requiere
-credenciales que el usuario no compartió, coherente con la política de nunca manejar
-credenciales financieras en su nombre.
+sueltos) y mockean solo las llamadas de red -- si el SDK real cambia de forma, estos tests rompen
+en vez de pasar en silencio.
+
+Después, con credenciales sandbox reales que el usuario cargó en su propio `.env`: se generó y
+registró un entity secret, se creó un wallet set y dos wallets developer-controlled (comprador y
+vendedor) en Base Sepolia vía la API real de Circle, y se probó `CircleWalletSigner` completo
+contra esa cuenta viva -- `.address`, `sign_typed_data` (EIP-712) y `sign_message` (EIP-191)
+devolvieron firmas ECDSA válidas de 65 bytes cada una. Sin fondos reales de por medio (sandbox),
+pero es una prueba de extremo a extremo real, no solo contra tipos del SDK.
+
+Incidente durante la verificación: al registrar el entity secret, un filtro de salida mal armado
+dejó que el valor del secret se imprimiera igual -- quedó expuesto en la conversación (privada,
+nunca publicada). Como no hay endpoint de API para rotarlo (solo vía Circle Console, confirmado
+inspeccionando el SDK), se le recomendó al usuario rotarlo ahí cuando pueda; rotar no invalida las
+wallets ya creadas. El archivo de recuperación de Circle y una copia local del entity secret
+quedaron en `secrets/` (agregado a `.gitignore`, nunca se commitea).
 
 <a id="rm-07"></a>
 
