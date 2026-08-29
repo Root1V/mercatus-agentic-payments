@@ -1,7 +1,9 @@
-import { useState } from "react";
-import { CheckCircle2, Loader2, Wallet, XCircle } from "lucide-react";
+import { type FormEvent, useState } from "react";
+import { CheckCircle2, Loader2, Settings as SettingsIcon, Wallet, XCircle } from "lucide-react";
 import { useTestCall } from "@/hooks/useTestCall";
+import { useUpdateWalletSettings, useWalletSettings } from "@/hooks/useWallet";
 import type { ProtocolName } from "@/types/protocol";
+import type { WalletBackend, WalletSettings as WalletSettingsData } from "@/types/wallet";
 import { truncateAddress } from "@/lib/format";
 import { AppShell } from "@/components/layout/AppShell";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,6 +12,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogCloseButton,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { CopyButton } from "@/components/ui/copy-button";
 import { ProtocolBadge } from "@/components/dashboard/ProtocolBadge";
 
@@ -22,6 +33,7 @@ export function BuyerTestPage() {
   const [protocol, setProtocol] = useState<ProtocolName>("x402");
   const [text, setText] = useState(DEFAULT_TEXT);
   const [maxSentences, setMaxSentences] = useState(2);
+  const [walletSettingsOpen, setWalletSettingsOpen] = useState(false);
   const testCall = useTestCall();
 
   function handleRun() {
@@ -35,11 +47,16 @@ export function BuyerTestPage() {
     >
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card>
-          <CardHeader>
-            <CardTitle>Configurar la llamada</CardTitle>
-            <CardDescription>
-              Servicio: <span className="font-medium text-foreground">text-summarizer</span> ($0.001/llamada)
-            </CardDescription>
+          <CardHeader className="flex-row items-start justify-between space-y-0">
+            <div>
+              <CardTitle>Configurar la llamada</CardTitle>
+              <CardDescription>
+                Servicio: <span className="font-medium text-foreground">text-summarizer</span> ($0.001/llamada)
+              </CardDescription>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setWalletSettingsOpen(true)}>
+              <SettingsIcon className="size-4" /> Configurar wallet
+            </Button>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
@@ -164,7 +181,140 @@ export function BuyerTestPage() {
           </CardContent>
         </Card>
       </div>
+
+      <WalletSettingsDialog open={walletSettingsOpen} onOpenChange={setWalletSettingsOpen} />
     </AppShell>
+  );
+}
+
+function WalletSettingsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { data: settings, isLoading, isError } = useWalletSettings();
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogCloseButton onClick={() => onOpenChange(false)} />
+      <DialogHeader>
+        <DialogTitle>Configurar wallet del comprador</DialogTitle>
+        <DialogDescription>
+          Con qué wallet firma el comprador (esta página y el playground de agentes). El
+          vendedor de ejemplo no se administra desde acá.
+        </DialogDescription>
+      </DialogHeader>
+      {open && isLoading && <Skeleton className="h-48" />}
+      {open && isError && (
+        <p className="text-sm text-destructive">No se pudo cargar la configuración actual.</p>
+      )}
+      {open && !isLoading && !isError && (
+        <WalletSettingsForm
+          key={settings?.updated_at ?? "unconfigured"}
+          settings={settings}
+          onClose={() => onOpenChange(false)}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function WalletSettingsForm({
+  settings,
+  onClose,
+}: {
+  settings: WalletSettingsData | undefined;
+  onClose: () => void;
+}) {
+  const updateSettings = useUpdateWalletSettings();
+  const [form, setForm] = useState({
+    backend: settings?.backend ?? ("local" as WalletBackend),
+    circle_api_key: "",
+    circle_entity_secret: "",
+    circle_wallet_id: settings?.circle_wallet_id ?? "",
+  });
+
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    updateSettings.mutate({
+      backend: form.backend,
+      circle_api_key: form.circle_api_key ? form.circle_api_key : undefined,
+      circle_entity_secret: form.circle_entity_secret ? form.circle_entity_secret : undefined,
+      circle_wallet_id: form.backend === "circle" ? form.circle_wallet_id : null,
+    });
+  }
+
+  return (
+    <form className="flex flex-col gap-3" onSubmit={handleSubmit}>
+      <div className="flex flex-col gap-1.5">
+        <Label>Backend</Label>
+        <Tabs value={form.backend} onValueChange={(v) => setForm({ ...form, backend: v as WalletBackend })}>
+          <TabsList>
+            <TabsTrigger value="local">Local (efímera)</TabsTrigger>
+            <TabsTrigger value="circle">Circle</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
+
+      {form.backend === "circle" && (
+        <>
+          <div className="flex flex-col gap-1.5">
+            <Label>
+              {settings?.has_circle_api_key ? "API key de Circle (dejar vacío para no cambiarla)" : "API key de Circle"}
+            </Label>
+            <Input
+              type="password"
+              required={!settings?.has_circle_api_key}
+              placeholder={settings?.has_circle_api_key ? "••••••••" : "TEST_API_KEY:..."}
+              value={form.circle_api_key}
+              onChange={(e) => setForm({ ...form, circle_api_key: e.target.value })}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>
+              {settings?.has_circle_entity_secret
+                ? "Entity secret (dejar vacío para no cambiarlo)"
+                : "Entity secret"}
+            </Label>
+            <Input
+              type="password"
+              required={!settings?.has_circle_entity_secret}
+              placeholder={settings?.has_circle_entity_secret ? "••••••••" : "hex de 64 caracteres"}
+              value={form.circle_entity_secret}
+              onChange={(e) => setForm({ ...form, circle_entity_secret: e.target.value })}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>Wallet ID de Circle</Label>
+            <Input
+              required
+              value={form.circle_wallet_id}
+              onChange={(e) => setForm({ ...form, circle_wallet_id: e.target.value })}
+            />
+          </div>
+        </>
+      )}
+
+      {updateSettings.isError && (
+        <p className="text-sm text-destructive">
+          {(updateSettings.error as Error)?.message ?? "No se pudo guardar la configuración."}
+        </p>
+      )}
+      {updateSettings.isSuccess && (
+        <p className="text-sm text-success">Guardado -- el próximo pago ya usa esta wallet.</p>
+      )}
+
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onClose}>
+          Cerrar
+        </Button>
+        <Button type="submit" disabled={updateSettings.isPending}>
+          {updateSettings.isPending ? "Guardando…" : "Guardar"}
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }
 

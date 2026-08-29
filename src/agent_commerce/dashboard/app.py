@@ -58,12 +58,16 @@ from agent_commerce.db.models import UserModel
 from agent_commerce.db.session import get_db
 from agent_commerce.llm.client import LLMClientError, PrometheusLLMClient
 from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
+from agent_commerce.payments.wallets.base import WalletSigner
+from agent_commerce.payments.wallets.circle_wallet import CircleWalletSigner
+from agent_commerce.payments.wallets.local_eoa import LocalEoaSigner
 
 from .adapters.sql_agent_store import SqlAgentStore
 from .adapters.sql_catalog_store import SqlCatalogStore
 from .adapters.sql_ledger_store import SqlLedgerStore
 from .adapters.sql_llm_settings_store import SqlLlmSettingsStore
-from .ports import Agent, AgentConversation, AgentMessage, LlmSettings
+from .adapters.sql_wallet_settings_store import SqlWalletSettingsStore
+from .ports import Agent, AgentConversation, AgentMessage, LlmSettings, WalletSettings
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CATALOG_SEED_PATH = _REPO_ROOT / "data" / "catalog.sample.json"
@@ -151,6 +155,14 @@ class UpdateLlmSettingsRequest(BaseModel):
     allowed_models: list[str] = []
 
 
+class UpdateWalletSettingsRequest(BaseModel):
+    backend: str  # "local" | "circle"
+    circle_api_key: str | None = None
+    # None = conservar el secreto ya guardado (para poder editar el resto sin reescribirlo).
+    circle_entity_secret: str | None = None
+    circle_wallet_id: str | None = None
+
+
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
     return {
         "id": agent.id,
@@ -225,6 +237,34 @@ class _LlmClientHolder:
         self.key: _LlmClientKey | None = None
 
 
+def _wallet_settings_to_dict(settings_row: WalletSettings) -> dict[str, Any]:
+    # El API key de Circle NUNCA se devuelve: autentica solo (como un
+    # password), no es un identificador público como el `client_id` de
+    # OAuth2 -- mismo tratamiento que `circle_entity_secret`.
+    return {
+        "backend": settings_row.backend,
+        "has_circle_api_key": settings_row.circle_api_key is not None,
+        "has_circle_entity_secret": settings_row.circle_entity_secret is not None,
+        "circle_wallet_id": settings_row.circle_wallet_id,
+        "updated_at": settings_row.updated_at.isoformat(),
+    }
+
+
+_WalletSignerKey = tuple[str, ...]
+
+
+class _WalletSignerHolder:
+    """Misma idea que `_LlmClientHolder` pero para el `WalletSigner` del
+    COMPRADOR: se reconstruye solo cuando cambia la configuración efectiva
+    (fila de `wallet_settings` si existe, si no `Settings.wallet_backend` de
+    entorno) -- así una wallet Circle no vuelve a pedir su dirección por red
+    en cada request, solo la primera vez que se usa esa configuración."""
+
+    def __init__(self, signer: WalletSigner | None) -> None:
+        self.signer = signer
+        self.key: _WalletSignerKey | None = None
+
+
 def _get_owned_agent(store: SqlAgentStore, agent_id: int, owner_user_id: int) -> Agent:
     agent = store.get_agent(agent_id)
     if agent is None or agent.owner_user_id != owner_user_id:
@@ -284,7 +324,12 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         for name in _PROTOCOL_NAMES
     }
     seller_signers = {name: build_wallet_signer(role="seller", settings=settings) for name in _PROTOCOL_NAMES}
-    buyer_signers = {name: build_wallet_signer(role="buyer", settings=settings) for name in _PROTOCOL_NAMES}
+    # El COMPRADOR sí es configurable en caliente desde el dashboard (RM-19,
+    # ver `_get_buyer_signer` más abajo) -- el vendedor de ejemplo no: ya
+    # levantó sus servidores reales con `pay_to=seller_signers[name].address`
+    # fijo al construir la app (unas líneas más abajo), así que cambiarle la
+    # wallet en caliente no movería el `pay_to` que esos procesos ya están
+    # anunciando. Extenderlo a también-dinámico queda para otra fase.
 
     seller_ports: dict[str, int] = {}
     seller_servers: list[uvicorn.Server] = []
@@ -316,6 +361,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
     # de forma perezosa en cada request via `_get_llm_client(db)`, cacheado
     # mientras la configuración no cambie.
     llm_holder = _LlmClientHolder(None)
+    wallet_signer_holder = _WalletSignerHolder(None)
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -366,6 +412,51 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         assert llm_holder.client is not None
         return llm_holder.client
 
+    def _get_buyer_signer(db: Session) -> WalletSigner:
+        """El backend de wallet del COMPRADOR (RM-06/RM-19): fila de
+        `wallet_settings` si existe, si no `Settings.wallet_backend` de
+        entorno como fallback -- mismo patrón que `_get_llm_client`. Solo
+        se reconstruye cuando la configuración efectiva cambia; una wallet
+        Circle ya resuelta reusa su dirección cacheada sin volver a pedirla
+        por red en cada request."""
+        settings_row = SqlWalletSettingsStore(db).get()
+        backend = settings_row.backend if settings_row is not None else settings.wallet_backend.value
+
+        if backend == "circle":
+            if settings_row is None or not (
+                settings_row.circle_api_key
+                and settings_row.circle_entity_secret
+                and settings_row.circle_wallet_id
+            ):
+                raise HTTPException(
+                    500,
+                    "El backend de wallet 'circle' requiere configurarlo desde 'Configurar "
+                    "wallet' en la página de Probar comprador (API key, entity secret y "
+                    "wallet_id de Circle).",
+                )
+            key: _WalletSignerKey = (
+                "circle",
+                settings_row.circle_api_key,
+                settings_row.circle_entity_secret,
+                settings_row.circle_wallet_id,
+            )
+            if wallet_signer_holder.key != key:
+                wallet_signer_holder.signer = CircleWalletSigner(
+                    wallet_id=settings_row.circle_wallet_id,
+                    api_key=settings_row.circle_api_key,
+                    entity_secret=settings_row.circle_entity_secret,
+                )
+                wallet_signer_holder.key = key
+        else:
+            local_key = settings.buyer_private_key.get_secret_value() if settings.buyer_private_key else None
+            key = ("local", local_key or "")
+            if wallet_signer_holder.key != key:
+                wallet_signer_holder.signer = LocalEoaSigner(private_key=local_key)
+                wallet_signer_holder.key = key
+
+        assert wallet_signer_holder.signer is not None
+        return wallet_signer_holder.signer
+
     def _agent_catalog(protocol: str) -> InMemoryServiceRegistry:
         # Mismo servicio real que /api/test-call: el catálogo persistido
         # (CatalogStore) es metadata administrable, no invocable de verdad
@@ -393,7 +484,15 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         return {"mode": settings.mode.value, "network": settings.network, **store.stats()}
 
     @api.get("/protocols")
-    async def api_protocols() -> list[dict[str, Any]]:
+    async def api_protocols(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+        # Si el backend de wallet Circle está mal configurado, no tiene
+        # sentido tumbar esta vista general por eso -- se degrada a
+        # `buyer_address: None` en vez de propagar el 500.
+        try:
+            buyer_address: str | None = _get_buyer_signer(db).address
+        except HTTPException:
+            buyer_address = None
+
         return [
             {
                 "name": name,
@@ -402,7 +501,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                 "network": settings.network,
                 "mode": settings.mode.value,
                 "seller_pay_to": seller_signers[name].address,
-                "buyer_address": buyer_signers[name].address,
+                "buyer_address": buyer_address,
                 "endpoint": _seller_url(name),
             }
             for name in _PROTOCOL_NAMES
@@ -494,7 +593,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             protocols=[payload.protocol],
         )
         catalog = InMemoryServiceRegistry([listing])
-        buyer_signer = buyer_signers[payload.protocol]
+        buyer_signer = _get_buyer_signer(db)
 
         started = time.monotonic()
         try:
@@ -618,6 +717,41 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
 
         return _llm_settings_to_dict(updated)
 
+    @api.get("/admin/wallet-settings")
+    async def api_get_wallet_settings(db: Session = Depends(get_db)) -> dict[str, Any]:
+        settings_row = SqlWalletSettingsStore(db).get()
+        if settings_row is not None:
+            return _wallet_settings_to_dict(settings_row)
+        return {
+            "backend": settings.wallet_backend.value,
+            "has_circle_api_key": False,
+            "has_circle_entity_secret": False,
+            "circle_wallet_id": None,
+            "updated_at": None,
+        }
+
+    @api.put("/admin/wallet-settings")
+    async def api_update_wallet_settings(
+        payload: UpdateWalletSettingsRequest, db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
+        if payload.backend not in ("local", "circle"):
+            raise HTTPException(400, f"Backend de wallet desconocido: {payload.backend}")
+        store = SqlWalletSettingsStore(db)
+        try:
+            updated = store.upsert(
+                backend=payload.backend,
+                circle_api_key=payload.circle_api_key,
+                circle_entity_secret=payload.circle_entity_secret,
+                circle_wallet_id=payload.circle_wallet_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        # No hace falta reconstruir el signer acá: `_get_buyer_signer` ya
+        # detecta el cambio de configuración (por `key`) la próxima vez que
+        # se use, igual que `_get_llm_client`.
+        return _wallet_settings_to_dict(updated)
+
     @api.post("/agents", status_code=201)
     async def api_create_agent(
         payload: CreateAgentRequest,
@@ -724,7 +858,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         store.add_message(conversation_id=conversation.id, role="user", content=payload.content)
         prompt = _build_prompt_with_history(prior_messages, payload.content)
 
-        buyer_signer = buyer_signers[agent.protocol]
+        buyer_signer = _get_buyer_signer(db)
         async with PayingAgent(
             protocol=protocols[agent.protocol], signer=buyer_signer, catalog=_agent_catalog(agent.protocol)
         ) as paying_agent:

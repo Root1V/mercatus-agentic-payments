@@ -33,7 +33,13 @@ export function ProtocolCompareCard({ protocol }: { protocol: ProtocolInfo }) {
           </div>
           <div className="flex items-center justify-between rounded-md bg-secondary/60 px-3 py-2">
             <dt className="text-muted-foreground">Comprador</dt>
-            <dd className="font-mono">{truncateAddress(protocol.buyer_address)}</dd>
+            <dd className="font-mono">
+              {protocol.buyer_address ? (
+                truncateAddress(protocol.buyer_address)
+              ) : (
+                <span className="text-destructive">Wallet mal configurada</span>
+              )}
+            </dd>
           </div>
         </dl>
       </CardContent>

@@ -1,5 +1,5 @@
-"""Puertos de persistencia del dashboard: `LedgerStore`, `CatalogStore`, `AgentStore` y
-`LlmSettingsStore`.
+"""Puertos de persistencia del dashboard: `LedgerStore`, `CatalogStore`, `AgentStore`,
+`LlmSettingsStore` y `WalletSettingsStore`.
 
 Mismo estilo que `payments/wallets/base.py`/`payments/protocols/base.py`:
 `dashboard/app.py` programa solo contra estos `Protocol`, nunca contra
@@ -197,4 +197,37 @@ class LlmSettingsStore(Protocol):
     ) -> LlmSettings:
         """Crea o actualiza la fila única. `client_secret=None` conserva el
         secreto ya guardado (para poder editar el resto sin reescribirlo)."""
+        ...
+
+
+@dataclass
+class WalletSettings:
+    backend: str  # "local" | "circle"
+    circle_api_key: str | None
+    circle_entity_secret: str | None
+    circle_wallet_id: str | None
+    updated_at: datetime
+
+
+@runtime_checkable
+class WalletSettingsStore(Protocol):
+    """Backend de wallet del comprador configurado desde el dashboard (fila
+    única) -- ver `WalletSettingsModel`. Solo el comprador; el vendedor de
+    ejemplo no se administra desde acá (ver nota del modelo)."""
+
+    def get(self) -> WalletSettings | None: ...
+
+    def upsert(
+        self,
+        *,
+        backend: str,
+        circle_api_key: str | None,
+        circle_entity_secret: str | None,
+        circle_wallet_id: str | None,
+    ) -> WalletSettings:
+        """Crea o actualiza la fila única. `circle_api_key`/`circle_entity_secret`
+        en `None` conservan lo ya guardado (ambos son credenciales -- el
+        API key solo también autentica contra Circle, no es un identificador
+        público como el `client_id` de OAuth2 -- así se puede editar el
+        resto sin reescribirlos)."""
         ...
