@@ -56,8 +56,25 @@ sin acoplamiento a un proveedor.
 **Estado:** 🟡 Parcial
 
 `payments/wallets/circle_wallet.py`: adaptador opcional (`agent-commerce[circle]`), import
-perezoso. El método exacto de firma EIP-712 del SDK de Circle no se pudo confirmar sin
-credenciales reales -- queda documentado en el propio archivo como pendiente de verificación.
+perezoso. La forma de la API SÍ se verificó -- instalando el extra e inspeccionando el código
+fuente real de `circle-developer-controlled-wallets` 9.6.0 (no hace falta credenciales para
+eso, solo el paquete) se encontraron y corrigieron tres suposiciones erróneas: la clase es
+`SigningApi` (no `SignatureApi`), los métodos son `sign_typed_data`/`sign_message` sin sufijo
+`_for_developer` (no existe en esta versión), y el request de EIP-712 es `SignTypedDataRequest`
+(no `SignTypedDataForDeveloperRequest`, que no existe). También se implementó `sign_message`
+(EIP-191), que antes lanzaba `NotImplementedError`. Se descubrió además que ambos requests
+exigen `entity_secret_ciphertext` -- el entity secret RSA-cifrado con la clave pública de
+Circle, *distinto en cada request* (`circle_utils.generate_entity_secret_ciphertext`, ver
+docstring del módulo) -- ausente en la versión anterior, que ni siquiera hubiera podido
+autenticar una llamada real.
+
+Verificado con tests (`tests/payments/wallets/test_circle_wallet.py`) que construyen instancias
+reales de los modelos pydantic del SDK (`EOAWallet`, `SignatureResponse`, etc., no dobles
+sueltos) y mockean solo las llamadas de red -- si el SDK real cambia de forma, estos tests
+rompen en vez de pasar en silencio. Lo único que sigue sin probarse es la llamada de red real
+contra una cuenta Circle viva (API key + entity secret + wallet_id reales) -- eso requiere
+credenciales que el usuario no compartió, coherente con la política de nunca manejar
+credenciales financieras en su nombre.
 
 <a id="rm-07"></a>
 
