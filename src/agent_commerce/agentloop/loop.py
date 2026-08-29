@@ -92,6 +92,20 @@ class _ParsedAction:
 
 def _parse_action(raw_content: str) -> _ParsedAction:
     text = raw_content.strip()
+    if not text:
+        # Modelos "razonadores" (p. ej. gpt-oss vía llama.cpp) a veces dejan
+        # `content` vacío y ponen toda su respuesta -- incluida la acción --
+        # en `reasoning_content` en vez de escribirla como mensaje visible.
+        # `_get_valid_action` ya usa `reasoning_content` como fallback de
+        # texto, así que si igual llega vacío acá es porque el modelo no
+        # escribió nada visible en absoluto -- un mensaje correctivo
+        # explícito (probado a mano contra un gpt-oss real) sí logra que en
+        # el siguiente intento el modelo escriba el JSON como contenido
+        # visible en vez de solo razonar sobre qué haría.
+        raise ValueError(
+            "La respuesta vino vacía. Escribí el objeto JSON de acción como tu mensaje "
+            "visible (contenido de respuesta), no solo como razonamiento interno."
+        )
     # Modelos locales a veces envuelven la respuesta en fences de markdown
     # pese a la instrucción explícita de no hacerlo -- se pelan antes de
     # json.loads en vez de tratarlo como un error de formato.
@@ -188,7 +202,14 @@ class AgentLoop:
         last_error: Exception | None = None
         for _ in range(self._max_json_retries_per_turn + 1):
             response = await self._llm.chat_completion(model=self._model, messages=attempt_messages)
-            content = response["choices"][0]["message"]["content"]
+            message = response["choices"][0]["message"]
+            # Modelos "razonadores" servidos por llama.cpp (p. ej. gpt-oss) a
+            # veces dejan `content` vacío y ponen todo -- incluida la acción
+            # final -- en `reasoning_content` (un campo propio de llama.cpp,
+            # fuera del schema estándar de OpenAI). Sin este fallback, esos
+            # modelos nunca producen una acción válida y agotan los
+            # reintentos siempre, aunque el gateway responda 200 cada vez.
+            content = message.get("content") or message.get("reasoning_content") or ""
             try:
                 return _parse_action(content)
             except (json.JSONDecodeError, ValueError, TypeError) as exc:
