@@ -45,6 +45,53 @@ def test_create_list_get_delete_agent(db_session: Session) -> None:
     assert store.delete_agent(created.id) is False
 
 
+def test_update_agent(db_session: Session) -> None:
+    user = _make_user(db_session)
+    store = SqlAgentStore(db_session)
+    created = store.create_agent(
+        owner_user_id=user.id,
+        name="Research Assistant",
+        instructions="Be concise.",
+        llm_model="qwen2.5-7b-instruct",
+        protocol="x402",
+        spend_limit_usd=Decimal("1.00"),
+    )
+
+    updated = store.update_agent(
+        created.id,
+        name="Renamed Assistant",
+        instructions="Always use the summarizer tool.",
+        llm_model="llama-3.1-8b",
+        protocol="ap2",
+        spend_limit_usd=Decimal("5.00"),
+    )
+    assert updated is not None
+    assert updated.id == created.id
+    assert updated.owner_user_id == user.id
+    assert updated.name == "Renamed Assistant"
+    assert updated.instructions == "Always use the summarizer tool."
+    assert updated.llm_model == "llama-3.1-8b"
+    assert updated.protocol == "ap2"
+    assert updated.spend_limit_usd == Decimal("5.00")
+
+    fetched = store.get_agent(created.id)
+    assert fetched is not None
+    assert fetched.name == "Renamed Assistant"
+
+
+def test_update_missing_agent_returns_none(db_session: Session) -> None:
+    store = SqlAgentStore(db_session)
+    result = store.update_agent(
+        999999,
+        name="x",
+        instructions="",
+        llm_model="m",
+        protocol="x402",
+        spend_limit_usd=None,
+    )
+    assert result is None
+
+
 def test_list_agents_is_scoped_to_owner(db_session: Session) -> None:
     alice = _make_user(db_session, "alice")
     bob = _make_user(db_session, "bob")

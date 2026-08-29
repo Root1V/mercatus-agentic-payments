@@ -644,6 +644,28 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         store = SqlAgentStore(db)
         return [_agent_to_dict(a) for a in store.list_agents(owner_user_id=current_user.id)]
 
+    @api.put("/agents/{agent_id}")
+    async def api_update_agent(
+        agent_id: int,
+        payload: CreateAgentRequest,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if payload.protocol not in protocols:
+            raise HTTPException(400, f"Protocolo desconocido: {payload.protocol}")
+        store = SqlAgentStore(db)
+        _get_owned_agent(store, agent_id, current_user.id)
+        updated = store.update_agent(
+            agent_id,
+            name=payload.name,
+            instructions=payload.instructions,
+            llm_model=payload.llm_model,
+            protocol=payload.protocol,
+            spend_limit_usd=payload.spend_limit_usd,
+        )
+        assert updated is not None  # _get_owned_agent ya confirmó que existe
+        return _agent_to_dict(updated)
+
     @api.delete("/agents/{agent_id}")
     async def api_delete_agent(
         agent_id: int, current_user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)

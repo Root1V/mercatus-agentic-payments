@@ -135,6 +135,19 @@ class AgentStore(Protocol):
 
     def get_agent(self, agent_id: int) -> Agent | None: ...
 
+    def update_agent(
+        self,
+        agent_id: int,
+        *,
+        name: str,
+        instructions: str,
+        llm_model: str,
+        protocol: str,
+        spend_limit_usd: Decimal | None,
+    ) -> Agent | None:
+        """Reemplaza los campos editables de un agente existente. `None` si no existe."""
+        ...
+
     def delete_agent(self, agent_id: int) -> bool: ...
 
     def create_conversation(self, *, agent_id: int, title: str) -> AgentConversation: ...
