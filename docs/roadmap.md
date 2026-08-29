@@ -233,3 +233,49 @@ tener Prometheus corriendo -- mismo límite que RM-11.
 Streaming SSE (pospuesto del MVP), manejo visible de fallos del gateway (nunca un 500 genérico),
 documentar en el README cómo levantar Prometheus sin chocar puertos y registrar `agent_commerce`
 como cliente OAuth2.
+
+<a id="rm-17"></a>
+
+## RM-17 — Configurar LLM desde el dashboard
+**Estado:** ✅ Hecho
+
+Motivación: RM-11/RM-14 conectaban Prometheus solo por variables de entorno del servidor
+(`AGENT_COMMERCE_LLM_*`). En la práctica, quien administra el dashboard no siempre tiene acceso al
+`.env` del servidor, y quien administra Prometheus es quien genera el `client_id`/`client_secret`
+(vía `POST /admin/clients` de su auth-service) recién cuando se lo pide -- hacía falta poder cargar
+esa conexión desde la propia UI, en caliente, sin reiniciar el proceso.
+
+Tabla `LlmSettingsModel` (fila única, `id=1`: `auth_base_url`, `gateway_base_url`, `client_id`,
+`client_secret`, `allowed_models`) + migración `0003_llm_settings.py`. Puerto `LlmSettingsStore`
+nuevo en `dashboard/ports.py` (mismo patrón que los demás), adaptadores `SqlLlmSettingsStore`/
+`InMemoryLlmSettingsStore`. Endpoints `GET`/`PUT /api/admin/llm-settings` -- el `GET` nunca
+devuelve `client_secret` (solo `has_secret: bool`), el `PUT` con `client_secret` omitido conserva
+el que ya estaba guardado (para poder editar el resto sin re-tipearlo).
+
+`dashboard/app.py` resuelve el `PrometheusLLMClient` de forma perezosa por request
+(`_get_llm_client(db)`), cacheado mientras la configuración efectiva (fila de `llm_settings` si
+existe, si no `Settings.llm_*` de entorno como fallback) no cambie -- así una edición desde
+`PUT /api/admin/llm-settings` toma efecto en el siguiente request sin reiniciar el dashboard, pero
+mientras no cambie se reusa la misma conexión (y su caché de token OAuth2, RM-11). Deliberadamente
+NO se lee la DB al construir la app: hacerlo así rompía el mecanismo de tests que reemplazan
+`Depends(get_db)` después de construir la app (`tests/dashboard/conftest.py`) -- se detectó porque
+los 18 tests de `test_agents_api.py`/`test_dashboard_app.py` empezaron a fallar con un error de
+conexión a la Postgres real por defecto.
+
+`GET /api/agents/llm-models` (RM-14) ahora filtra por `allowed_models` cuando hay alguno
+configurado ("los modelos que se contrataron"); `?include_all=true` devuelve la lista sin filtrar,
+usado solo por el propio diálogo de configuración para elegir cuáles habilitar.
+
+`frontend/src/pages/AgentPlaygroundPage.tsx`: botón de engranaje junto a "Crear" abre
+`LlmSettingsDialog` (URLs, client ID, client secret -- placeholder "dejar vacío para no
+cambiarlo" una vez configurado --, y modelos habilitados como texto separado por coma, con la
+lista real disponible mostrada abajo una vez que la conexión ya funciona). El sub-componente del
+formulario se remonta por `key={settings.updated_at}` para siempre arrancar con los valores reales
+guardados, no con lo que quedó de una edición anterior.
+
+Verificado de punta a punta en el navegador: con un mock local del auth-service/gateway (dos
+modelos), se configuró la conexión desde el diálogo (sin ninguna variable de entorno del lado del
+dashboard), apareció la lista de modelos disponibles, se restringió a uno solo, y el selector de
+modelo del diálogo "Nuevo agente" mostró exactamente ese único modelo -- confirmando el filtro de
+`allowed_models` en vivo. 4 tests del adaptador SQL + 5 tests de la API nuevos (mock de
+auth-service/gateway como servidor real, mismo patrón que RM-14).

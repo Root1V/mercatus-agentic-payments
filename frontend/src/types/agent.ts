@@ -57,3 +57,24 @@ export interface AgentMessage {
   total_spent_usd: string | null;
   created_at: string;
 }
+
+export type LlmSettingsSource = "db" | "env" | "none";
+
+export interface LlmSettings {
+  configured: boolean;
+  source: LlmSettingsSource;
+  auth_base_url: string;
+  gateway_base_url: string;
+  client_id: string;
+  has_secret: boolean;
+  allowed_models: string[];
+  updated_at: string | null;
+}
+
+export interface UpdateLlmSettingsInput {
+  auth_base_url: string;
+  gateway_base_url: string;
+  client_id: string;
+  client_secret?: string;
+  allowed_models: string[];
+}

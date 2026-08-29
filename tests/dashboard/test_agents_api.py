@@ -46,13 +46,14 @@ def _start_uvicorn(app: FastAPI, port: int) -> uvicorn.Server:
     return server
 
 
-def _build_fake_prometheus_app(script: list[dict]) -> FastAPI:
+def _build_fake_prometheus_app(script: list[dict], *, model_ids: list[str] | None = None) -> FastAPI:
     """Sirve `/oauth2/token`, `/v1/models` y `/v1/chat/completions` con
     respuestas fijas -- `script` es la secuencia de acciones ReAct
     (`{"thought", "action", "action_input"}`) que el "modelo" devuelve, una
     por cada llamada a `/v1/chat/completions`, en orden."""
     app = FastAPI()
     state = {"calls": 0}
+    ids = model_ids or ["fake-model"]
 
     @app.post("/oauth2/token")
     async def token() -> dict:
@@ -60,7 +61,10 @@ def _build_fake_prometheus_app(script: list[dict]) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models() -> dict:
-        return {"object": "list", "data": [{"id": "fake-model", "object": "model", "owned_by": "test"}]}
+        return {
+            "object": "list",
+            "data": [{"id": model_id, "object": "model", "owned_by": "test"} for model_id in ids],
+        }
 
     @app.post("/v1/chat/completions")
     async def chat_completions() -> dict:
@@ -343,3 +347,129 @@ def test_deleting_agent_cascades_conversations(dashboard_client_no_llm: TestClie
         f"/api/agents/{agent['id']}/conversations", headers=headers
     )
     assert conversations_of_deleted_agent.status_code == 404
+
+
+def test_get_llm_settings_when_unconfigured(dashboard_client_no_llm: TestClient) -> None:
+    headers = _auth_headers(dashboard_client_no_llm)
+    response = dashboard_client_no_llm.get("/api/admin/llm-settings", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["configured"] is False
+    assert body["source"] == "none"
+    assert "client_secret" not in body
+
+
+def test_put_llm_settings_connects_llm_without_env_vars(dashboard_client_no_llm: TestClient) -> None:
+    """El caso de uso central: sin ningún AGENT_COMMERCE_LLM_* en el entorno
+    del proceso, configurar la conexión desde el endpoint de admin alcanza
+    para que /api/agents/llm-models empiece a funcionar."""
+    fake_app = _build_fake_prometheus_app([], model_ids=["qwen2.5-7b-instruct"])
+    port = _free_port()
+    _start_uvicorn(fake_app, port)
+
+    client = dashboard_client_no_llm
+    headers = _auth_headers(client)
+
+    put_response = client.put(
+        "/api/admin/llm-settings",
+        json={
+            "auth_base_url": f"http://127.0.0.1:{port}",
+            "gateway_base_url": f"http://127.0.0.1:{port}",
+            "client_id": "agent-commerce",
+            "client_secret": "shh",
+            "allowed_models": [],
+        },
+        headers=headers,
+    )
+    assert put_response.status_code == 200
+    body = put_response.json()
+    assert body["configured"] is True
+    assert body["source"] == "db"
+    assert body["has_secret"] is True
+    assert "client_secret" not in body
+
+    get_response = client.get("/api/admin/llm-settings", headers=headers)
+    assert get_response.json()["client_id"] == "agent-commerce"
+    assert "client_secret" not in get_response.json()
+
+    models_response = client.get("/api/agents/llm-models", headers=headers)
+    assert models_response.status_code == 200
+    assert models_response.json()["models"] == [
+        {"id": "qwen2.5-7b-instruct", "object": "model", "owned_by": "test"}
+    ]
+
+
+def test_llm_models_respects_allowed_models_filter(dashboard_client_no_llm: TestClient) -> None:
+    fake_app = _build_fake_prometheus_app([], model_ids=["model-a", "model-b"])
+    port = _free_port()
+    _start_uvicorn(fake_app, port)
+
+    client = dashboard_client_no_llm
+    headers = _auth_headers(client)
+    client.put(
+        "/api/admin/llm-settings",
+        json={
+            "auth_base_url": f"http://127.0.0.1:{port}",
+            "gateway_base_url": f"http://127.0.0.1:{port}",
+            "client_id": "agent-commerce",
+            "client_secret": "shh",
+            "allowed_models": ["model-b"],
+        },
+        headers=headers,
+    )
+
+    filtered = client.get("/api/agents/llm-models", headers=headers)
+    assert [m["id"] for m in filtered.json()["models"]] == ["model-b"]
+
+    unfiltered = client.get("/api/agents/llm-models?include_all=true", headers=headers)
+    assert [m["id"] for m in unfiltered.json()["models"]] == ["model-a", "model-b"]
+
+
+def test_put_llm_settings_without_secret_keeps_previous_one(dashboard_client_no_llm: TestClient) -> None:
+    fake_app = _build_fake_prometheus_app([], model_ids=["fake-model"])
+    port = _free_port()
+    _start_uvicorn(fake_app, port)
+
+    client = dashboard_client_no_llm
+    headers = _auth_headers(client)
+    base_payload = {
+        "auth_base_url": f"http://127.0.0.1:{port}",
+        "gateway_base_url": f"http://127.0.0.1:{port}",
+        "client_id": "agent-commerce",
+    }
+    client.put(
+        "/api/admin/llm-settings",
+        json={**base_payload, "client_secret": "shh", "allowed_models": []},
+        headers=headers,
+    )
+
+    # Segundo PUT sin client_secret: solo cambia allowed_models, el secreto
+    # guardado antes se mantiene y la conexión sigue funcionando.
+    second = client.put(
+        "/api/admin/llm-settings",
+        json={**base_payload, "allowed_models": ["fake-model"]},
+        headers=headers,
+    )
+    assert second.status_code == 200
+    assert second.json()["has_secret"] is True
+
+    models_response = client.get("/api/agents/llm-models", headers=headers)
+    assert models_response.status_code == 200
+    assert [m["id"] for m in models_response.json()["models"]] == ["fake-model"]
+
+
+def test_put_llm_settings_without_secret_and_no_prior_config_fails(
+    dashboard_client_no_llm: TestClient,
+) -> None:
+    headers = _auth_headers(dashboard_client_no_llm)
+    response = dashboard_client_no_llm.put(
+        "/api/admin/llm-settings",
+        json={
+            "auth_base_url": "http://127.0.0.1:9",
+            "gateway_base_url": "http://127.0.0.1:9",
+            "client_id": "agent-commerce",
+            "allowed_models": [],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 400

@@ -1,5 +1,13 @@
 import { apiClient } from "./client";
-import type { Agent, AgentConversation, AgentMessage, CreateAgentInput, LlmModel } from "@/types/agent";
+import type {
+  Agent,
+  AgentConversation,
+  AgentMessage,
+  CreateAgentInput,
+  LlmModel,
+  LlmSettings,
+  UpdateLlmSettingsInput,
+} from "@/types/agent";
 
 export async function fetchAgents(): Promise<Agent[]> {
   const { data } = await apiClient.get<Agent[]>("/api/agents");
@@ -15,9 +23,21 @@ export async function deleteAgent(id: number): Promise<void> {
   await apiClient.delete(`/api/agents/${id}`);
 }
 
-export async function fetchLlmModels(): Promise<LlmModel[]> {
-  const { data } = await apiClient.get<{ models: LlmModel[] }>("/api/agents/llm-models");
+export async function fetchLlmModels(options?: { includeAll?: boolean }): Promise<LlmModel[]> {
+  const { data } = await apiClient.get<{ models: LlmModel[] }>("/api/agents/llm-models", {
+    params: options?.includeAll ? { include_all: true } : undefined,
+  });
   return data.models;
+}
+
+export async function fetchLlmSettings(): Promise<LlmSettings> {
+  const { data } = await apiClient.get<LlmSettings>("/api/admin/llm-settings");
+  return data;
+}
+
+export async function updateLlmSettings(input: UpdateLlmSettingsInput): Promise<LlmSettings> {
+  const { data } = await apiClient.put<LlmSettings>("/api/admin/llm-settings", input);
+  return data;
 }
 
 export async function fetchConversations(agentId: number): Promise<AgentConversation[]> {

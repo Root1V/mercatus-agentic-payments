@@ -110,3 +110,24 @@ class AgentMessageModel(Base):
     trace: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     total_spent_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class LlmSettingsModel(Base):
+    """Fila única (singleton, `id=1`) con la conexión a Prometheus configurada
+    desde el dashboard en vez de variables de entorno -- así quien administra
+    el dashboard no necesita acceso al `.env` del servidor para conectar un
+    LLM, solo las credenciales que le dio quien administra Prometheus."""
+
+    __tablename__ = "llm_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    auth_base_url: Mapped[str] = mapped_column(String(500))
+    gateway_base_url: Mapped[str] = mapped_column(String(500))
+    client_id: Mapped[str] = mapped_column(String(200))
+    client_secret: Mapped[str] = mapped_column(String(500))
+    # Modelos habilitados para usar en agentes (los "contratados") -- lista
+    # vacía = sin restricción, se ofrecen todos los que devuelva el gateway.
+    allowed_models: Mapped[list[str]] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

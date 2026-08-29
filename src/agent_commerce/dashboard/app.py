@@ -62,7 +62,8 @@ from agent_commerce.payments.factory import build_wallet_signer, get_payment_pro
 from .adapters.sql_agent_store import SqlAgentStore
 from .adapters.sql_catalog_store import SqlCatalogStore
 from .adapters.sql_ledger_store import SqlLedgerStore
-from .ports import Agent, AgentConversation, AgentMessage
+from .adapters.sql_llm_settings_store import SqlLlmSettingsStore
+from .ports import Agent, AgentConversation, AgentMessage, LlmSettings
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CATALOG_SEED_PATH = _REPO_ROOT / "data" / "catalog.sample.json"
@@ -141,6 +142,15 @@ class CreateMessageRequest(BaseModel):
     content: str
 
 
+class UpdateLlmSettingsRequest(BaseModel):
+    auth_base_url: str
+    gateway_base_url: str
+    client_id: str
+    # None = conservar el secreto ya guardado (para poder editar el resto sin reescribirlo).
+    client_secret: str | None = None
+    allowed_models: list[str] = []
+
+
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
     return {
         "id": agent.id,
@@ -173,6 +183,46 @@ def _message_to_dict(message: AgentMessage) -> dict[str, Any]:
         "total_spent_usd": str(message.total_spent_usd) if message.total_spent_usd is not None else None,
         "created_at": message.created_at.isoformat(),
     }
+
+
+def _llm_settings_to_dict(settings_row: LlmSettings) -> dict[str, Any]:
+    return {
+        "configured": True,
+        "source": "db",
+        "auth_base_url": settings_row.auth_base_url,
+        "gateway_base_url": settings_row.gateway_base_url,
+        "client_id": settings_row.client_id,
+        "has_secret": True,
+        "allowed_models": settings_row.allowed_models,
+        "updated_at": settings_row.updated_at.isoformat(),
+    }
+
+
+def _build_llm_client(
+    *, auth_base_url: str, gateway_base_url: str, client_id: str, client_secret: str
+) -> PrometheusLLMClient:
+    return PrometheusLLMClient(
+        auth_base_url=auth_base_url,
+        gateway_base_url=gateway_base_url,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+
+
+_LlmClientKey = tuple[str, str, str, str]
+
+
+class _LlmClientHolder:
+    """Caja mutable para el `PrometheusLLMClient` activo: `_get_llm_client`
+    lo reconstruye sólo cuando `key` (URLs + client_id/secret efectivos)
+    cambia respecto de la última vez -- así una edición desde
+    `PUT /api/admin/llm-settings` toma efecto en el siguiente request sin
+    reiniciar el proceso, pero mientras la config no cambie se reusa la
+    misma conexión (y su caché de token OAuth2)."""
+
+    def __init__(self, client: PrometheusLLMClient | None) -> None:
+        self.client = client
+        self.key: _LlmClientKey | None = None
 
 
 def _get_owned_agent(store: SqlAgentStore, agent_id: int, owner_user_id: int) -> Agent:
@@ -245,39 +295,76 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         seller_ports[name] = port
 
     # Cliente al gateway de Prometheus (RM-11) para el playground de agentes
-    # (RM-14) -- opcional: sin AGENT_COMMERCE_LLM_CLIENT_ID/SECRET el resto
-    # del dashboard sigue funcionando, solo los endpoints de /api/agents que
+    # (RM-14) -- opcional: sin credenciales configuradas, el resto del
+    # dashboard sigue funcionando, solo los endpoints de /api/agents que
     # necesitan el LLM devuelven 500 explicando qué falta configurar.
-    llm_client: PrometheusLLMClient | None = None
-    if settings.llm_client_id and settings.llm_client_secret:
-        llm_client = PrometheusLLMClient(
-            auth_base_url=settings.llm_auth_base_url,
-            gateway_base_url=settings.llm_gateway_base_url,
-            client_id=settings.llm_client_id,
-            client_secret=settings.llm_client_secret.get_secret_value(),
-        )
+    #
+    # La conexión (URLs + client_id/secret + modelos habilitados) se guarda
+    # en la tabla `llm_settings` vía PUT /api/admin/llm-settings -- así quien
+    # administra el dashboard no necesita acceso al `.env` del servidor para
+    # conectar un LLM, solo las credenciales que le dio quien administra
+    # Prometheus. Si no hay fila en la DB todavía, se usan las variables de
+    # entorno `AGENT_COMMERCE_LLM_*` como fallback (deploys que sí prefieren
+    # configurarlo por `.env`). La DB manda una vez configurada.
+    #
+    # Deliberadamente NO se lee la DB al construir la app (a diferencia del
+    # resto del estado que sí se arma acá, como `protocols`/`seller_signers`):
+    # `build_dashboard_app` no depende de `Depends(get_db)`, así que abrir una
+    # sesión acá usaría siempre la `Settings.database_url` real -- rompiendo
+    # el patrón de tests que reemplazan `get_db` DESPUÉS de construir la app
+    # (ver `tests/dashboard/conftest.py`). En cambio, el cliente se resuelve
+    # de forma perezosa en cada request via `_get_llm_client(db)`, cacheado
+    # mientras la configuración no cambie.
+    llm_holder = _LlmClientHolder(None)
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         for server in seller_servers:
             server.should_exit = True
-        if llm_client is not None:
-            await llm_client.aclose()
+        if llm_holder.client is not None:
+            await llm_holder.client.aclose()
 
     app = FastAPI(title="agent_commerce dashboard", lifespan=_lifespan)
 
     def _seller_url(protocol: str) -> str:
         return f"http://127.0.0.1:{seller_ports[protocol]}/summarize"
 
-    def _require_llm_client() -> PrometheusLLMClient:
-        if llm_client is None:
+    async def _get_llm_client(db: Session) -> PrometheusLLMClient:
+        settings_row = SqlLlmSettingsStore(db).get()
+        if settings_row is not None:
+            key = (
+                settings_row.auth_base_url,
+                settings_row.gateway_base_url,
+                settings_row.client_id,
+                settings_row.client_secret,
+            )
+        elif settings.llm_client_id and settings.llm_client_secret:
+            key = (
+                settings.llm_auth_base_url,
+                settings.llm_gateway_base_url,
+                settings.llm_client_id,
+                settings.llm_client_secret.get_secret_value(),
+            )
+        else:
             raise HTTPException(
                 500,
-                "El playground de agentes requiere AGENT_COMMERCE_LLM_CLIENT_ID y "
-                "AGENT_COMMERCE_LLM_CLIENT_SECRET (credenciales de Prometheus) -- ver .env.example.",
+                "El playground de agentes requiere conectar un LLM: configuralo desde "
+                "'Configurar LLM' en la página de Agentes, o con AGENT_COMMERCE_LLM_CLIENT_ID/"
+                "AGENT_COMMERCE_LLM_CLIENT_SECRET -- ver .env.example.",
             )
-        return llm_client
+
+        if llm_holder.key != key:
+            old_client = llm_holder.client
+            llm_holder.client = _build_llm_client(
+                auth_base_url=key[0], gateway_base_url=key[1], client_id=key[2], client_secret=key[3]
+            )
+            llm_holder.key = key
+            if old_client is not None:
+                await old_client.aclose()
+
+        assert llm_holder.client is not None
+        return llm_holder.client
 
     def _agent_catalog(protocol: str) -> InMemoryServiceRegistry:
         # Mismo servicio real que /api/test-call: el catálogo persistido
@@ -467,13 +554,69 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @api.get("/agents/llm-models")
-    async def api_llm_models() -> dict[str, Any]:
-        client = _require_llm_client()
+    async def api_llm_models(
+        include_all: bool = False, db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
+        """`include_all=true` se usa desde el diálogo de configuración (para
+        elegir qué modelos habilitar) -- el resto de la app siempre ve la
+        lista ya filtrada por `allowed_models` (si hay alguno configurado)."""
+        client = await _get_llm_client(db)
         try:
             models = await client.list_models()
         except LLMClientError as exc:
             raise HTTPException(502, f"No se pudo listar los modelos de Prometheus: {exc}") from exc
+
+        if not include_all:
+            settings_row = SqlLlmSettingsStore(db).get()
+            if settings_row is not None and settings_row.allowed_models:
+                allowed_ids = set(settings_row.allowed_models)
+                models = [m for m in models if m.get("id") in allowed_ids]
+
         return {"models": models}
+
+    @api.get("/admin/llm-settings")
+    async def api_get_llm_settings(db: Session = Depends(get_db)) -> dict[str, Any]:
+        settings_row = SqlLlmSettingsStore(db).get()
+        if settings_row is not None:
+            return _llm_settings_to_dict(settings_row)
+        return {
+            "configured": bool(settings.llm_client_id and settings.llm_client_secret),
+            "source": "env" if settings.llm_client_id else "none",
+            "auth_base_url": settings.llm_auth_base_url,
+            "gateway_base_url": settings.llm_gateway_base_url,
+            "client_id": settings.llm_client_id or "",
+            "has_secret": bool(settings.llm_client_secret),
+            "allowed_models": [],
+            "updated_at": None,
+        }
+
+    @api.put("/admin/llm-settings")
+    async def api_update_llm_settings(
+        payload: UpdateLlmSettingsRequest, db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
+        store = SqlLlmSettingsStore(db)
+        try:
+            updated = store.upsert(
+                auth_base_url=payload.auth_base_url,
+                gateway_base_url=payload.gateway_base_url,
+                client_id=payload.client_id,
+                client_secret=payload.client_secret,
+                allowed_models=payload.allowed_models,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        old_client = llm_holder.client
+        llm_holder.client = _build_llm_client(
+            auth_base_url=updated.auth_base_url,
+            gateway_base_url=updated.gateway_base_url,
+            client_id=updated.client_id,
+            client_secret=updated.client_secret,
+        )
+        if old_client is not None:
+            await old_client.aclose()
+
+        return _llm_settings_to_dict(updated)
 
     @api.post("/agents", status_code=201)
     async def api_create_agent(
@@ -553,7 +696,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         store = SqlAgentStore(db)
         agent = _get_owned_agent(store, agent_id, current_user.id)
         conversation = _get_owned_conversation(store, conversation_id, agent)
-        client = _require_llm_client()
+        client = await _get_llm_client(db)
 
         prior_messages = store.list_messages(conversation.id)
         store.add_message(conversation_id=conversation.id, role="user", content=payload.content)
