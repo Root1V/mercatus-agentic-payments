@@ -49,6 +49,32 @@ class InMemoryAgentStore:
     def get_agent(self, agent_id: int) -> Agent | None:
         return self._agents.get(agent_id)
 
+    def update_agent(
+        self,
+        agent_id: int,
+        *,
+        name: str,
+        instructions: str,
+        llm_model: str,
+        protocol: str,
+        spend_limit_usd: Decimal | None,
+    ) -> Agent | None:
+        existing = self._agents.get(agent_id)
+        if existing is None:
+            return None
+        updated = Agent(
+            id=existing.id,
+            owner_user_id=existing.owner_user_id,
+            name=name,
+            instructions=instructions,
+            llm_model=llm_model,
+            protocol=protocol,
+            spend_limit_usd=spend_limit_usd,
+            created_at=existing.created_at,
+        )
+        self._agents[agent_id] = updated
+        return updated
+
     def delete_agent(self, agent_id: int) -> bool:
         return self._agents.pop(agent_id, None) is not None
 

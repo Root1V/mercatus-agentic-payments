@@ -19,6 +19,11 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
   return data;
 }
 
+export async function updateAgent(id: number, input: CreateAgentInput): Promise<Agent> {
+  const { data } = await apiClient.put<Agent>(`/api/agents/${id}`, input);
+  return data;
+}
+
 export async function deleteAgent(id: number): Promise<void> {
   await apiClient.delete(`/api/agents/${id}`);
 }

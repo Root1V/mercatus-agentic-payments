@@ -190,6 +190,76 @@ def test_create_agent_rejects_unknown_protocol(dashboard_client_no_llm: TestClie
     assert response.status_code == 400
 
 
+def test_update_agent(dashboard_client_no_llm: TestClient) -> None:
+    headers = _auth_headers(dashboard_client_no_llm)
+    created = dashboard_client_no_llm.post(
+        "/api/agents",
+        json={"name": "A", "instructions": "", "llm_model": "m", "protocol": "x402"},
+        headers=headers,
+    ).json()
+
+    updated = dashboard_client_no_llm.put(
+        f"/api/agents/{created['id']}",
+        json={
+            "name": "A renamed",
+            "instructions": "Siempre usá la herramienta de resumen.",
+            "llm_model": "llama-3.1-8b",
+            "protocol": "ap2",
+            "spend_limit_usd": "2.50",
+        },
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["id"] == created["id"]
+    assert body["name"] == "A renamed"
+    assert body["instructions"] == "Siempre usá la herramienta de resumen."
+    assert body["llm_model"] == "llama-3.1-8b"
+    assert body["protocol"] == "ap2"
+    assert Decimal(body["spend_limit_usd"]) == Decimal("2.50")
+
+    listed = dashboard_client_no_llm.get("/api/agents", headers=headers).json()
+    assert listed[0]["name"] == "A renamed"
+
+
+def test_update_agent_rejects_unknown_protocol(dashboard_client_no_llm: TestClient) -> None:
+    headers = _auth_headers(dashboard_client_no_llm)
+    created = dashboard_client_no_llm.post(
+        "/api/agents", json={"name": "A", "llm_model": "m", "protocol": "x402"}, headers=headers
+    ).json()
+
+    response = dashboard_client_no_llm.put(
+        f"/api/agents/{created['id']}",
+        json={"name": "A", "llm_model": "m", "protocol": "not-a-protocol"},
+        headers=headers,
+    )
+    assert response.status_code == 400
+
+
+def test_update_agent_requires_ownership(dashboard_client_no_llm: TestClient) -> None:
+    from agent_commerce.auth.dependencies import get_current_user
+    from agent_commerce.db.models import UserModel
+
+    client = dashboard_client_no_llm
+    headers = _auth_headers(client)
+    created = client.post(
+        "/api/agents", json={"name": "A", "llm_model": "m", "protocol": "x402"}, headers=headers
+    ).json()
+
+    other_user = UserModel(id=999, username="mallory", hashed_password="x", is_active=True)
+    app = client.app
+    app.dependency_overrides[get_current_user] = lambda: other_user  # type: ignore[attr-defined]
+    try:
+        response = client.put(
+            f"/api/agents/{created['id']}",
+            json={"name": "hijacked", "llm_model": "m", "protocol": "x402"},
+            headers=headers,
+        )
+        assert response.status_code == 404
+    finally:
+        del app.dependency_overrides[get_current_user]  # type: ignore[attr-defined]
+
+
 def test_agents_are_isolated_per_user(dashboard_client_no_llm: TestClient) -> None:
     from agent_commerce.auth.dependencies import get_current_user
     from agent_commerce.db.models import UserModel

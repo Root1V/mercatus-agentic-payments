@@ -83,6 +83,28 @@ class SqlAgentStore:
         model = self._db.get(AgentModel, agent_id)
         return _to_agent(model) if model is not None else None
 
+    def update_agent(
+        self,
+        agent_id: int,
+        *,
+        name: str,
+        instructions: str,
+        llm_model: str,
+        protocol: str,
+        spend_limit_usd: Decimal | None,
+    ) -> Agent | None:
+        model = self._db.get(AgentModel, agent_id)
+        if model is None:
+            return None
+        model.name = name
+        model.instructions = instructions
+        model.llm_model = llm_model
+        model.protocol = protocol
+        model.spend_limit_usd = spend_limit_usd
+        self._db.commit()
+        self._db.refresh(model)
+        return _to_agent(model)
+
     def delete_agent(self, agent_id: int) -> bool:
         model = self._db.get(AgentModel, agent_id)
         if model is None:

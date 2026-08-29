@@ -9,6 +9,7 @@ import {
   fetchLlmSettings,
   fetchMessages,
   sendMessage,
+  updateAgent,
   updateLlmSettings,
 } from "@/api/agents";
 import type { CreateAgentInput, UpdateLlmSettingsInput } from "@/types/agent";
@@ -23,6 +24,14 @@ export function useCreateAgent() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: CreateAgentInput) => createAgent(input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: AGENTS_KEY }),
+  });
+}
+
+export function useUpdateAgent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: number; input: CreateAgentInput }) => updateAgent(id, input),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: AGENTS_KEY }),
   });
 }

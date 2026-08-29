@@ -1,5 +1,15 @@
 import { type FormEvent, useState } from "react";
-import { Ban, Bot, Loader2, Plus, Send, Settings as SettingsIcon, Trash2, Wallet } from "lucide-react";
+import {
+  Ban,
+  Bot,
+  Loader2,
+  Pencil,
+  Plus,
+  Send,
+  Settings as SettingsIcon,
+  Trash2,
+  Wallet,
+} from "lucide-react";
 import {
   useAgents,
   useAllLlmModels,
@@ -11,9 +21,10 @@ import {
   useLlmSettings,
   useMessages,
   useSendMessage,
+  useUpdateAgent,
   useUpdateLlmSettings,
 } from "@/hooks/useAgents";
-import type { CreateAgentInput, LlmSettings } from "@/types/agent";
+import type { Agent, CreateAgentInput, LlmSettings } from "@/types/agent";
 import type { ProtocolName } from "@/types/protocol";
 import { formatUsd } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -45,17 +56,44 @@ const EMPTY_FORM: CreateAgentInput = {
   spend_limit_usd: "",
 };
 
+function agentToForm(agent: Agent): CreateAgentInput {
+  return {
+    name: agent.name,
+    instructions: agent.instructions,
+    llm_model: agent.llm_model,
+    protocol: agent.protocol,
+    spend_limit_usd: agent.spend_limit_usd,
+  };
+}
+
 export function AgentPlaygroundPage() {
   const { data: agents, isLoading: agentsLoading } = useAgents();
   const createAgent = useCreateAgent();
+  const updateAgent = useUpdateAgent();
   const deleteAgent = useDeleteAgent();
   const llmModels = useLlmModels();
 
   const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null);
   const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [form, setForm] = useState<CreateAgentInput>(EMPTY_FORM);
   const [deletingId, setDeletingId] = useState<number | undefined>();
+
+  const isEditing = editingId !== null;
+  const agentMutation = isEditing ? updateAgent : createAgent;
+
+  function openCreateDialog() {
+    setEditingId(null);
+    setForm(EMPTY_FORM);
+    setOpen(true);
+  }
+
+  function openEditDialog(agent: Agent) {
+    setEditingId(agent.id);
+    setForm(agentToForm(agent));
+    setOpen(true);
+  }
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -63,13 +101,17 @@ export function AgentPlaygroundPage() {
       ...form,
       spend_limit_usd: form.spend_limit_usd ? form.spend_limit_usd : null,
     };
-    createAgent.mutate(payload, {
-      onSuccess: (agent) => {
-        setOpen(false);
-        setForm(EMPTY_FORM);
-        setSelectedAgentId(agent.id);
-      },
-    });
+    const onSuccess = (agent: Agent) => {
+      setOpen(false);
+      setForm(EMPTY_FORM);
+      setEditingId(null);
+      setSelectedAgentId(agent.id);
+    };
+    if (isEditing) {
+      updateAgent.mutate({ id: editingId, input: payload }, { onSuccess });
+    } else {
+      createAgent.mutate(payload, { onSuccess });
+    }
   }
 
   function handleDelete(id: number) {
@@ -97,7 +139,7 @@ export function AgentPlaygroundPage() {
               <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)}>
                 <SettingsIcon className="size-4" />
               </Button>
-              <Button size="sm" onClick={() => setOpen(true)}>
+              <Button size="sm" onClick={openCreateDialog}>
                 <Plus className="size-4" /> Crear
               </Button>
             </div>
@@ -118,7 +160,7 @@ export function AgentPlaygroundPage() {
                         type="button"
                         onClick={() => setSelectedAgentId(agent.id)}
                         className={cn(
-                          "flex w-full items-center gap-2 rounded-lg border px-3 py-2 pr-9 text-left text-sm transition-colors",
+                          "flex w-full items-center gap-2 rounded-lg border px-3 py-2 pr-16 text-left text-sm transition-colors",
                           selectedAgentId === agent.id
                             ? "border-primary bg-primary/5"
                             : "border-border hover:bg-secondary/60",
@@ -132,19 +174,29 @@ export function AgentPlaygroundPage() {
                           </span>
                         </div>
                       </button>
-                      <button
-                        type="button"
-                        aria-label="Eliminar agente"
-                        onClick={() => handleDelete(agent.id)}
-                        disabled={deletingId === agent.id}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                      >
-                        {deletingId === agent.id ? (
-                          <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="size-3.5" />
-                        )}
-                      </button>
+                      <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                        <button
+                          type="button"
+                          aria-label="Editar agente"
+                          onClick={() => openEditDialog(agent)}
+                          className="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        >
+                          <Pencil className="size-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Eliminar agente"
+                          onClick={() => handleDelete(agent.id)}
+                          disabled={deletingId === agent.id}
+                          className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          {deletingId === agent.id ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="size-3.5" />
+                          )}
+                        </button>
+                      </div>
                     </div>
                   </li>
                 ))}
@@ -168,7 +220,7 @@ export function AgentPlaygroundPage() {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogCloseButton onClick={() => setOpen(false)} />
         <DialogHeader>
-          <DialogTitle>Nuevo agente</DialogTitle>
+          <DialogTitle>{isEditing ? "Editar agente" : "Nuevo agente"}</DialogTitle>
         </DialogHeader>
         <form className="flex flex-col gap-3" onSubmit={handleSubmit}>
           <div className="flex flex-col gap-1.5">
@@ -240,16 +292,22 @@ export function AgentPlaygroundPage() {
             </div>
           </div>
 
-          {createAgent.isError && (
-            <p className="text-sm text-destructive">No se pudo crear el agente.</p>
+          {agentMutation.isError && (
+            <p className="text-sm text-destructive">
+              {isEditing ? "No se pudo actualizar el agente." : "No se pudo crear el agente."}
+            </p>
           )}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>
               Cancelar
             </Button>
-            <Button type="submit" disabled={createAgent.isPending || !form.llm_model}>
-              {createAgent.isPending ? "Creando…" : "Crear agente"}
+            <Button type="submit" disabled={agentMutation.isPending || !form.llm_model}>
+              {agentMutation.isPending
+                ? "Guardando…"
+                : isEditing
+                  ? "Guardar cambios"
+                  : "Crear agente"}
             </Button>
           </DialogFooter>
         </form>
