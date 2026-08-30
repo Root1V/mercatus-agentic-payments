@@ -58,7 +58,7 @@ from agent_commerce.db.models import UserModel
 from agent_commerce.db.session import get_db
 from agent_commerce.llm.client import LLMClientError, PrometheusLLMClient
 from agent_commerce.payments.aibank_credential import AIBankCredential
-from agent_commerce.payments.factory import build_payer_credential, get_payment_protocol
+from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
 from agent_commerce.payments.wallets.circle_wallet import CircleWalletSigner
 from agent_commerce.payments.wallets.local_eoa import LocalEoaSigner
 
@@ -329,37 +329,62 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         sys.path.insert(0, repo_root_str)
     from examples.seller_text_summarizer.app import build_app as build_seller_app
 
-    # `settings.ap2_settlement` (RM-18: x402 o aibank) queda fijo para toda
-    # la vida del proceso -- es una propiedad de la instancia de
-    # `AP2Protocol` que arma `mount_seller` acá abajo (el mismo objeto que
-    # después usa el comprador vía `protocols["ap2"]`), no algo reconfigurable
-    # en caliente sin remontar el servidor del vendedor. Para cambiarlo hay
-    # que reiniciar el dashboard con `AGENT_COMMERCE_AP2_SETTLEMENT=aibank`.
     protocols = {
         name: get_payment_protocol(settings.model_copy(update={"protocol": Protocol(name)}))
         for name in _PROTOCOL_NAMES
     }
-    # `build_payer_credential` (no `build_wallet_signer`): si
-    # `ap2_settlement=aibank`, `seller_signers["ap2"]` tiene que ser una
-    # `AIBankCredential`, no un `WalletSigner` -- si no, `pay_to` sería una
-    # dirección EVM que `AP2Protocol` en riel AIBank nunca podría liquidar.
-    seller_signers = {
-        name: build_payer_credential(
-            role="seller", settings=settings.model_copy(update={"protocol": Protocol(name)})
-        )
-        for name in _PROTOCOL_NAMES
-    }
-    # El COMPRADOR sí es configurable en caliente desde el dashboard (RM-19,
-    # ver `_get_buyer_signer` más abajo) -- el vendedor de ejemplo no: ya
-    # levantó sus servidores reales con `pay_to=seller_signers[name].address`
-    # fijo al construir la app (unas líneas más abajo), así que cambiarle la
-    # wallet en caliente no movería el `pay_to` que esos procesos ya están
-    # anunciando. Extenderlo a también-dinámico queda para otra fase.
+    # Wallet del vendedor por protocolo -- fija: el vendedor de ejemplo ya
+    # levantó su servidor real con `pay_to` anunciado al construir la app
+    # (unas líneas más abajo), así que no se puede cambiar en caliente sin
+    # remontar ese proceso (a diferencia del comprador, ver RM-19 más abajo).
+    # Para AP2 hacen falta las DOS credenciales del vendedor (x402 Y AIBank,
+    # RM-18): el riel que ofrece cada carrito nuevo sí es dinámico (ver
+    # `_resolve_ap2_rail`), y el vendedor tiene que poder anunciar el
+    # `pay_to` correcto para cualquiera de los dos sin reiniciar.
+    seller_signers = {name: build_wallet_signer(role="seller", settings=settings) for name in _PROTOCOL_NAMES}
+    ap2_aibank_seller_credential = AIBankCredential(
+        account_id=settings.aibank_seller_account_id,
+        api_key=settings.aibank_seller_api_key.get_secret_value() if settings.aibank_seller_api_key else None,
+    )
+
+    # El riel de AP2 (x402 o AIBank, RM-18) se resuelve EN VIVO por request,
+    # leyendo el mismo `wallet_settings.backend` que ya usa `_get_buyer_signer`
+    # (RM-19) -- así elegir "AIBank" en "Configurar wallet" cambia con qué
+    # riel el vendedor ofrece el próximo pago, sin reiniciar el dashboard.
+    # `_dashboard_app_ref` es una referencia diferida a `app` (recién se
+    # construye más abajo, después de este loop) para poder leer
+    # `app.dependency_overrides` en cada llamada -- necesario para que esto
+    # también funcione en los tests, que reemplazan `get_db` DESPUÉS de
+    # construir la app (mismo motivo que `_get_llm_client`/`_get_buyer_signer`
+    # no leen la DB al construir la app, ver comentario más abajo).
+    _dashboard_app_ref: list[FastAPI] = []
+
+    def _resolve_ap2_rail() -> SettlementRail:
+        dashboard_app = _dashboard_app_ref[0]
+        db_dependency = dashboard_app.dependency_overrides.get(get_db, get_db)
+        db_gen = db_dependency()
+        db = next(db_gen)
+        try:
+            settings_row = SqlWalletSettingsStore(db).get()
+            backend = settings_row.backend if settings_row is not None else settings.wallet_backend.value
+            return SettlementRail.AIBANK if backend == "aibank" else SettlementRail.X402
+        finally:
+            try:
+                next(db_gen)
+            except StopIteration:
+                pass
 
     seller_ports: dict[str, int] = {}
     seller_servers: list[uvicorn.Server] = []
     for name in _PROTOCOL_NAMES:
-        seller_app = build_seller_app(protocol=protocols[name], pay_to=seller_signers[name].address)
+        mount_seller_extra = (
+            {"aibank_pay_to": ap2_aibank_seller_credential.address, "rail_resolver": _resolve_ap2_rail}
+            if name == "ap2"
+            else None
+        )
+        seller_app = build_seller_app(
+            protocol=protocols[name], pay_to=seller_signers[name].address, mount_seller_extra=mount_seller_extra
+        )
         port = _free_port()
         seller_servers.append(_start_uvicorn(seller_app, port))
         seller_ports[name] = port
@@ -397,6 +422,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             await llm_holder.client.aclose()
 
     app = FastAPI(title="agent_commerce dashboard", lifespan=_lifespan)
+    _dashboard_app_ref.append(app)
 
     def _seller_url(protocol: str) -> str:
         return f"http://127.0.0.1:{seller_ports[protocol]}/summarize"
@@ -447,25 +473,12 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
 
         `protocol` es el protocolo del request actual (`x402`/`ap2`): hace
         falta para validar el backend `aibank` (RM-18), que solo tiene
-        sentido con AP2 y solo si el dashboard arrancó con
-        `ap2_settlement=aibank` (es una propiedad de la instancia de
-        `AP2Protocol` ya montada, fija desde `build_dashboard_app` -- ver
-        comentario ahí)."""
+        sentido con AP2 -- x402 no tiene ningún riel bancario, no es una
+        cuestión de cómo arrancó el proceso (`_resolve_ap2_rail`, en
+        `build_dashboard_app`, ya sigue este mismo backend en vivo del lado
+        del vendedor)."""
         settings_row = SqlWalletSettingsStore(db).get()
         backend = settings_row.backend if settings_row is not None else settings.wallet_backend.value
-
-        if protocol == "ap2" and settings.ap2_settlement is SettlementRail.AIBANK and backend != "aibank":
-            # El dashboard arrancó con el riel de AP2 fijado en AIBank -- la
-            # instancia de `AP2Protocol` ya montada solo acepta una
-            # `AIBankCredential` (ver `build_buyer_client`); cualquier otro
-            # backend acá produciría un `AssertionError` crudo más abajo en
-            # vez de un error claro.
-            raise HTTPException(
-                500,
-                "Este dashboard se inició con AGENT_COMMERCE_AP2_SETTLEMENT=aibank: el backend de "
-                "wallet del comprador tiene que ser 'aibank' para poder pagar con AP2 -- cambialo "
-                "desde 'Configurar wallet'.",
-            )
 
         if backend == "aibank":
             if protocol != "ap2":
@@ -473,13 +486,6 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                     500,
                     "El backend de wallet 'aibank' solo aplica al protocolo AP2 -- elegí AP2 "
                     "arriba, o cambiá de backend desde 'Configurar wallet'.",
-                )
-            if settings.ap2_settlement is not SettlementRail.AIBANK:
-                raise HTTPException(
-                    500,
-                    "El backend de wallet 'aibank' requiere que el dashboard se haya iniciado con "
-                    "AGENT_COMMERCE_AP2_SETTLEMENT=aibank -- el riel de liquidación de AP2 queda "
-                    "fijo al arrancar el proceso, no se puede cambiar en caliente.",
                 )
             key: _WalletSignerKey = (
                 "aibank",

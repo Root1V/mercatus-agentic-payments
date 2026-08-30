@@ -8,18 +8,28 @@ ese carrito) -- agnósticos al riel de pago real. Este módulo usa los tipos
 pydantic reales del paquete `ap2` (que reflejan 1:1 los tipos oficiales de
 `google-agentic-commerce/AP2`) para esos mandatos.
 
-**Riel de liquidación (`Settings.ap2_settlement`, RM-18)**: AP2 está
-diseñado a propósito para ser agnóstico al riel real de pago -- por eso acá
-`AIBankCredential`/`MockAIBank` (banco propio, RM-18) se conectan como un
-**segundo riel de liquidación de AP2**, no como un protocolo aparte.
-`ap2_settlement=x402` (default) liquida delegando en el mismo motor x402
-que usa `X402Protocol` (tal como en el mundo real la extensión oficial
-`a2a-x402` de Google usa x402 como riel de liquidación dentro de un
-mandato AP2); `ap2_settlement=aibank` liquida autorizando + capturando
-contra `MockAIBank` en vez de firmar una transferencia on-chain. Pedirle a
-un banco que "hable x402" directamente no tiene sentido: lo obligaría a
-custodiar cripto y firmar EIP-712 como una wallet -- en ese punto ya sería
-Circle (RM-06), no un banco propio.
+**Riel de liquidación (RM-18)**: AP2 está diseñado a propósito para ser
+agnóstico al riel real de pago -- por eso acá `AIBankCredential`/
+`MockAIBank` (banco propio, RM-18) se conectan como un **segundo riel de
+liquidación de AP2**, no como un protocolo aparte. El riel x402 liquida
+delegando en el mismo motor x402 que usa `X402Protocol` (tal como en el
+mundo real la extensión oficial `a2a-x402` de Google usa x402 como riel de
+liquidación dentro de un mandato AP2); el riel AIBank liquida autorizando +
+capturando contra `MockAIBank` en vez de firmar una transferencia on-chain.
+Pedirle a un banco que "hable x402" directamente no tiene sentido: lo
+obligaría a custodiar cripto y firmar EIP-712 como una wallet -- en ese
+punto ya sería Circle (RM-06), no un banco propio.
+
+`__init__` construye SIEMPRE el facilitator de x402 y el `MockAIBank`,
+sin importar `Settings.ap2_settlement` -- ese campo es solo el riel por
+defecto que usan el comprador (`build_buyer_client`, que en realidad decide
+por el TIPO de credencial que recibe) y el vendedor cuando nadie pide
+explícitamente otra cosa (CLI/ejemplos/tests, un único riel fijo por
+proceso, como cualquier otra `Settings`). El dashboard (RM-19) en cambio le
+pasa a `mount_seller` su propio `rail_resolver` -- una función que lee en
+cada request cuál es el backend de wallet configurado ahora mismo -- así
+que ahí el riel de AP2 se puede cambiar en caliente sin reiniciar el
+proceso, igual que el resto de la configuración del comprador.
 
 La firma del `CartMandate` (`merchant_authorization`, identidad del
 comerciante) es independiente del riel y siempre EIP-191 vía
@@ -60,6 +70,7 @@ import base64
 import json
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -210,16 +221,18 @@ class _AP2SellerState:
         prices: dict[str, str],
         merchant_signer: WalletSigner,
         merchant_name: str,
-        rail: SettlementRail,
+        rail_resolver: Callable[[], SettlementRail],
+        aibank_pay_to: str | None = None,
         facilitator: Any = None,
         bank: MockAIBank | None = None,
     ) -> None:
         self._network = network
         self._pay_to = pay_to
+        self._aibank_pay_to = aibank_pay_to
         self._prices = prices
         self._merchant_signer = merchant_signer
         self._merchant_name = merchant_name
-        self._rail = rail
+        self._rail_resolver = rail_resolver
         self._facilitator = facilitator
         self._bank = bank
         self._pending_carts: dict[str, _PendingCart] = {}
@@ -230,24 +243,36 @@ class _AP2SellerState:
         return candidate if candidate in self._prices else None
 
     def issue_cart(self, route_key: str) -> CartMandate:
+        # El riel se resuelve DE NUEVO en cada carrito emitido (no una vez al
+        # montar el vendedor): así, en el dashboard, cambiar el backend de
+        # wallet del comprador (RM-19) cambia con qué riel el vendedor
+        # empieza a ofrecer el próximo pago, sin reiniciar el proceso. Un
+        # carrito ya emitido conserva SU riel (guardado en `_PendingCart`)
+        # aunque la config cambie antes de que se redima -- evita que un
+        # cambio a mitad de camino invalide un pago en curso.
+        rail = self._rail_resolver()
         price = self._prices[route_key]
         cart_id = f"cart_{uuid.uuid4().hex}"
         amount = Decimal(parse_money(price)["amount"])
 
-        if self._rail is SettlementRail.X402:
+        if rail is SettlementRail.X402:
             requirements = _build_requirements(network=self._network, pay_to=self._pay_to, price_usd=price)
             method_data = _x402_method_data(requirements)
             pending = _PendingCart(
-                rail=self._rail,
+                rail=rail,
                 pay_to=self._pay_to,
                 amount=amount,
                 expires_at=time.time() + _CART_TTL_SECONDS,
                 x402_requirements=requirements,
             )
         else:
-            method_data = _aibank_method_data(pay_to=self._pay_to, price_usd=price)
+            assert self._aibank_pay_to is not None
+            method_data = _aibank_method_data(pay_to=self._aibank_pay_to, price_usd=price)
             pending = _PendingCart(
-                rail=self._rail, pay_to=self._pay_to, amount=amount, expires_at=time.time() + _CART_TTL_SECONDS
+                rail=rail,
+                pay_to=self._aibank_pay_to,
+                amount=amount,
+                expires_at=time.time() + _CART_TTL_SECONDS,
             )
 
         cart_mandate = _build_cart_mandate(
@@ -326,6 +351,7 @@ class _AP2SellerState:
         )
         return {
             "payer": settle_response.payer or "",
+            "pay_to": pending.pay_to,
             "network": str(settle_response.network),
             "amount": str(amount_usd),
             "transaction": settle_response.transaction,
@@ -349,6 +375,7 @@ class _AP2SellerState:
 
         return {
             "payer": authorization.payer_account_id,
+            "pay_to": pending.pay_to,
             "network": _AIBANK_NETWORK,
             "amount": str(authorization.amount),
             "transaction": authorization.id,
@@ -491,7 +518,15 @@ class AP2Protocol(PaymentProtocol):
     def __init__(self, settings: Settings | None = None, *, merchant_name: str = "agent_commerce demo") -> None:
         self._settings = settings or get_settings()
         self._merchant_name = merchant_name
-        self._rail = self._settings.ap2_settlement
+        # Riel por defecto cuando nadie pide uno específico (CLI/ejemplos:
+        # `Settings.ap2_settlement`, fijo por proceso -- ahí sí tiene sentido
+        # reiniciar para cambiarlo, como cualquier otra `Settings`). El
+        # dashboard en cambio pasa su propio `rail_resolver` a `mount_seller`
+        # para resolverlo en caliente por request (RM-18/RM-19) -- por eso
+        # el facilitator de x402 Y el `MockAIBank` se construyen los DOS acá,
+        # sin importar `ap2_settlement`: cualquiera de los dos rieles puede
+        # pedirse en cualquier momento.
+        self._default_rail = self._settings.ap2_settlement
         # Clave de identidad del comerciante para firmar CartMandate -- distinta,
         # a propósito, de `pay_to` (la dirección que RECIBE los fondos) y
         # del riel de liquidación: en el mundo real la identidad de firma y
@@ -499,25 +534,34 @@ class AP2Protocol(PaymentProtocol):
         # "soy este comerciante" no depende de cómo se cobra.
         self._merchant_signer = LocalEoaSigner()
 
-        if self._rail is SettlementRail.AIBANK:
-            from agent_commerce.payments.mock_aibank import MockAIBank
+        from agent_commerce.payments.mock_aibank import MockAIBank
 
-            self._bank: MockAIBank | None = MockAIBank()
-            self._facilitator = None
-        else:
-            self._bank = None
-            self._facilitator = build_facilitator_client(self._settings)
+        self._bank: MockAIBank = MockAIBank()
+        self._facilitator = build_facilitator_client(self._settings)
 
-    def mount_seller(self, app: FastAPI, *, pay_to: str, prices: dict[str, str]) -> None:
+    def mount_seller(
+        self,
+        app: FastAPI,
+        *,
+        pay_to: str,
+        prices: dict[str, str],
+        aibank_pay_to: str | None = None,
+        rail_resolver: Callable[[], SettlementRail] | None = None,
+    ) -> None:
+        """`aibank_pay_to`/`rail_resolver` son opcionales, solo los usa el
+        dashboard (RM-18/RM-19) para poder ofrecer cualquiera de los dos
+        rieles en caliente -- sin ellos, el comportamiento es el de siempre
+        (CLI/ejemplos/tests): un único riel fijo, `self._default_rail`."""
         from fastapi.responses import JSONResponse
 
         state = _AP2SellerState(
             network=self._settings.network,
             pay_to=pay_to,
+            aibank_pay_to=aibank_pay_to if aibank_pay_to is not None else pay_to,
             prices=prices,
             merchant_signer=self._merchant_signer,
             merchant_name=self._merchant_name,
-            rail=self._rail,
+            rail_resolver=rail_resolver or (lambda: self._default_rail),
             facilitator=self._facilitator,
             bank=self._bank,
         )
@@ -542,16 +586,24 @@ class AP2Protocol(PaymentProtocol):
                 return JSONResponse(status_code=402, content={"error": str(exc)})
 
             response = await call_next(request)
-            payload = {"settle": settle, "pay_to": pay_to, "payment_mandate_id": payment_mandate_id}
+            payload = {
+                "settle": settle,
+                "pay_to": settle.get("pay_to", pay_to),
+                "payment_mandate_id": payment_mandate_id,
+            }
             response.headers[_AP2_SETTLEMENT_HEADER] = base64.urlsafe_b64encode(
                 _canonical_json(payload)
             ).decode()
             return response
 
     def build_buyer_client(self, signer: PayerCredential) -> BuyerClient:
-        if self._rail is SettlementRail.AIBANK:
-            assert isinstance(signer, AIBankCredential)
-            return _AP2BuyerClient(httpx.AsyncClient(), signer, self._rail, _bank=self._bank)
+        # El riel lo decide el TIPO de credencial que trajo el comprador, no
+        # un estado fijo del protocolo (RM-18/RM-19): así el dashboard puede
+        # cambiar de backend de wallet en caliente y el próximo pago sigue
+        # el riel correcto sin reiniciar el proceso. `self._bank`/
+        # `self._facilitator` siempre están construidos (ver `__init__`).
+        if isinstance(signer, AIBankCredential):
+            return _AP2BuyerClient(httpx.AsyncClient(), signer, SettlementRail.AIBANK, _bank=self._bank)
         assert isinstance(signer, WalletSigner)
         scheme = ExactEvmClientScheme(signer)
-        return _AP2BuyerClient(httpx.AsyncClient(), signer, self._rail, _scheme=scheme)
+        return _AP2BuyerClient(httpx.AsyncClient(), signer, SettlementRail.X402, _scheme=scheme)

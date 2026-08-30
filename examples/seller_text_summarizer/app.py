@@ -9,7 +9,7 @@ no de este archivo.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -30,7 +30,9 @@ class SummarizeRequest(BaseModel):
     max_sentences: int = 2
 
 
-def build_app(*, protocol: PaymentProtocol, pay_to: str) -> FastAPI:
+def build_app(
+    *, protocol: PaymentProtocol, pay_to: str, mount_seller_extra: dict[str, Any] | None = None
+) -> FastAPI:
     app = FastAPI(title="agent_commerce: text-summarizer (vendedor de ejemplo)")
 
     @app.post("/summarize")
@@ -51,7 +53,9 @@ def build_app(*, protocol: PaymentProtocol, pay_to: str) -> FastAPI:
             "protocols": [protocol.name],
         }
 
-    mount_payments(app, protocol=protocol, pay_to=pay_to, prices={ROUTE: PRICE_USD})
+    mount_payments(
+        app, protocol=protocol, pay_to=pay_to, prices={ROUTE: PRICE_USD}, mount_seller_extra=mount_seller_extra
+    )
     return app
 
 

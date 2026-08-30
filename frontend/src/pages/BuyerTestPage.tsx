@@ -316,11 +316,8 @@ function WalletSettingsForm({
       {form.backend === "aibank" && (
         <>
           <p className="rounded-lg bg-secondary/60 p-3 text-xs text-muted-foreground">
-            Solo tiene efecto con el protocolo <span className="font-medium text-foreground">AP2</span>, y
-            solo si el dashboard se inició con{" "}
-            <code className="rounded bg-secondary px-1 py-0.5">AGENT_COMMERCE_AP2_SETTLEMENT=aibank</code> --
-            el riel de liquidación de AP2 queda fijo al arrancar el proceso, no se puede cambiar en
-            caliente.
+            Solo tiene efecto con el protocolo <span className="font-medium text-foreground">AP2</span> --
+            con x402 no aplica, es un riel exclusivamente bancario.
           </p>
           <div className="flex flex-col gap-1.5">
             <Label>Cuenta de AIBank (opcional)</Label>

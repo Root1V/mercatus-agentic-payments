@@ -465,29 +465,57 @@ con dos columnas nuevas nullable (`aibank_account_id`, `aibank_api_key`) y migra
 diferencia de Circle, ninguno de los dos es obligatorio la primera vez: si se dejan vacíos,
 `AIBankCredential` genera una cuenta efímera al vuelo (mismo criterio que la wallet local).
 
-Restricción real, distinta de RM-19: el riel de AP2 (`ap2_settlement`) es una propiedad de la
-instancia de `AP2Protocol` que ya montó el servidor del vendedor al arrancar el proceso -- **no se
-puede cambiar en caliente** sin reiniciar el dashboard con `AGENT_COMMERCE_AP2_SETTLEMENT=aibank`
-(a diferencia de la credencial del comprador en sí, que sí es dinámica, como toda wallet desde
-RM-19). `_get_buyer_signer` valida esto explícitamente en dos direcciones: pedir `aibank` con
-`protocol=x402`, o pedir `aibank` cuando el dashboard NO arrancó con ese riel, degradan con un 500
-y un mensaje claro (no un `AssertionError` crudo) -- y al revés, dejar el backend en `local`/`circle`
-mientras el dashboard SÍ arrancó en riel AIBank también se detecta y explica antes de llegar a
-`AP2Protocol.build_buyer_client`. `seller_signers["ap2"]` también se resuelve con
-`build_payer_credential` (no `build_wallet_signer`) para que, en ese modo, sea una
-`AIBankCredential` -- si no, `pay_to` sería una dirección EVM que ese riel nunca podría liquidar.
+**Primer intento (descartado tras probarlo con el usuario): riel de AP2 fijo al arrancar el
+proceso**, exigiendo reiniciar el dashboard con `AGENT_COMMERCE_AP2_SETTLEMENT=aibank` para poder
+usarlo -- inconsistente con el resto de RM-19 (todo lo demás del comprador ya era configurable en
+caliente). La pregunta correcta ("¿por qué no configurar esto desde el mismo dashboard, como todo
+lo demás?") llevó a rediseñarlo: **el riel de AP2 ahora se resuelve en cada request**, leyendo el
+mismo `wallet_settings.backend` que ya usa `_get_buyer_signer` -- cambiar a "AIBank" en "Configurar
+wallet" cambia con qué riel el vendedor ofrece el próximo pago, sin reiniciar nada.
+
+Para lograrlo, `AP2Protocol` (`payments/protocols/ap2_protocol.py`) cambió de raíz:
+- `__init__` ahora construye SIEMPRE el facilitator de x402 y el `MockAIBank`, sin importar
+  `Settings.ap2_settlement` (que queda como default solo para CLI/ejemplos sin dashboard).
+- `mount_seller` ganó dos parámetros opcionales, `aibank_pay_to`/`rail_resolver` -- sin ellos
+  (CLI/ejemplos/tests), el comportamiento es exactamente el de antes, un riel fijo; el dashboard sí
+  los pasa. Cada carrito nuevo (`issue_cart`) llama a `rail_resolver()` para decidir con qué riel
+  ofrecerse -- pero un carrito YA emitido conserva su propio riel guardado, aunque la config cambie
+  antes de que se redima (para no invalidar un pago en curso a mitad de camino).
+- `build_buyer_client` dejó de mirar un riel fijo del protocolo: ahora lo decide el TIPO de
+  credencial que le llega (`isinstance(signer, AIBankCredential)`) -- exactamente lo que
+  `_get_buyer_signer` ya resuelve en vivo del lado del comprador.
+- `mount_payments`/`build_app` (vendedor) ganaron un `mount_seller_extra: dict | None` genérico para
+  poder pasarle esos dos parámetros a `AP2Protocol` sin ensuciar el contrato simple que ven
+  x402/AP2-sin-dashboard (`server/monetize.py`, `examples/seller_text_summarizer/app.py`).
+- Todo esto sigue siendo LSP-compatible sin ningún `type: ignore` de por medio en `ap2_protocol.py`
+  (ensanchar `build_buyer_client(signer: WalletSigner)` a `PayerCredential` es válido porque acepta
+  MÁS tipos que la base, no menos) -- el único `# type: ignore` de todo el cambio quedó en
+  `monetize.py`, en el `**dict` splat hacia `PaymentProtocol.mount_seller` (que no declara
+  `**kwargs`), comentado explicando por qué.
+
+`dashboard/app.py`: `seller_signers` volvió a `build_wallet_signer` (siempre `WalletSigner`, sin
+condicionar por riel) más una `AIBankCredential` nueva y separada,
+`ap2_aibank_seller_credential`, para el `pay_to` del riel AIBank -- el vendedor de AP2 necesita
+poder anunciar CUALQUIERA de los dos `pay_to` según qué carrito esté emitiendo. `_resolve_ap2_rail`
+(el `rail_resolver` que se le pasa a `mount_seller`) lee `wallet_settings` con una sesión de DB
+propia, resuelta contra `app.dependency_overrides` (no contra `Settings.database_url` directo) para
+seguir funcionando en los tests, que reemplazan `get_db` DESPUÉS de construir la app -- por eso hay
+una referencia diferida (`_dashboard_app_ref`, una lista de un elemento) a la propia `app`, que
+recién se construye más abajo en la misma función. `_get_buyer_signer` se simplificó: ya no hay
+ningún chequeo de "el dashboard arrancó con el riel equivocado" -- solo queda la validación real y
+permanente ("`aibank` no aplica a `x402`").
 
 Frontend (`BuyerTestPage.tsx`): tercera pestaña "AIBank" en "Configurar wallet", con los dos campos
-opcionales y un aviso inline explicando la restricción de arranque. El badge del recibo
-("Firmado con...") ahora distingue los tres backends.
+opcionales; el aviso ya no menciona reiniciar el proceso. El badge del recibo ("Firmado con...")
+distingue los tres backends.
 
-Verificado en el navegador con el dashboard real reiniciado con `AP2_SETTLEMENT=aibank`: pago AP2
-liquidado con el badge "Firmado con AIBank", red `aibank:mock`, cuentas generadas automáticamente;
-x402 confirmado sin regresión en la misma sesión; el caso de backend mal emparejado con el protocolo
-mostró el 500 con el mensaje esperado (`El backend de wallet 'aibank' solo aplica al protocolo AP2...`).
-10 tests nuevos (3 del adaptador SQL, 7 de la API -- incluye un pago AP2/AIBank real de punta a
-punta vía el dashboard y el caso "riel aibank, backend sin actualizar"). Suite completa 146/146,
-`ruff`/`mypy` limpios.
+Verificado en el navegador, en la MISMA corrida del dashboard (sin `AP2_SETTLEMENT` ni reinicio
+alguno): pago AP2 sobre x402 ("Firmado con wallet local", `eip155:84532`) → cambio a AIBank desde
+"Configurar wallet" → pago AP2 inmediatamente después sobre AIBank ("Firmado con AIBank",
+`aibank:mock`) → cambio de vuelta a Local → x402 de nuevo, sin ningún reinicio en el medio. 9 tests
+nuevos (3 del adaptador SQL, 6 de la API) reemplazan a los que probaban el diseño anterior --
+incluye `test_switching_between_x402_and_aibank_live_without_restart`, que corre ese mismo
+ida-y-vuelta contra un único `dashboard_client`. Suite completa 145/145, `ruff`/`mypy` limpios.
 
 <a id="rm-19"></a>
 
