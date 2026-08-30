@@ -1,9 +1,12 @@
-"""AIBank (RM-18) no comparte el fixture parametrizado `seller_server`
-(`tests/conftest.py`, `params=[Protocol.X402, Protocol.AP2]`) a propósito:
-ese fixture -- y `test_protocol_contract.py` -- asumen un `WalletSigner`
-como credencial de comprador para cualquier protocolo, cosa que AIBank no
-tiene (ver `payments/protocols/aibank_protocol.py`). Este archivo mirror-ea
-la estructura de `test_x402_protocol_mock.py` pero con `AIBankCredential`."""
+"""AP2 liquidado sobre el riel AIBank (RM-18: `Settings.ap2_settlement=aibank`
+en vez de x402). Mismo mandato Cart/Payment que `test_ap2_protocol_mock.py`,
+pero con `AIBankCredential` -- ese archivo verifica el riel x402 y no toca
+ninguno de estos casos.
+
+`AP2Protocol` mantiene un `MockAIBank` por instancia, así que vendedor y
+comprador tienen que compartir la MISMA instancia de `AP2Protocol` para que
+la autorización que arma el comprador sea visible al vendedor al redimir
+(ver `payments/protocols/ap2_protocol.py`)."""
 
 from __future__ import annotations
 
@@ -16,9 +19,9 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 
-from agent_commerce.config import Mode, Protocol, Settings
+from agent_commerce.config import Mode, Protocol, Settings, SettlementRail
 from agent_commerce.payments.aibank_credential import AIBankCredential
-from agent_commerce.payments.protocols.aibank_protocol import AIBankProtocol
+from agent_commerce.payments.protocols.ap2_protocol import AP2Protocol
 
 
 def _free_port() -> int:
@@ -27,7 +30,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _build_app(protocol: AIBankProtocol, pay_to: str) -> FastAPI:
+def _build_app(protocol: AP2Protocol, pay_to: str) -> FastAPI:
     app = FastAPI()
 
     @app.post("/echo")
@@ -48,11 +51,11 @@ def _run_app(app: FastAPI, port: int) -> uvicorn.Server:
     return server
 
 
-def _new_protocol() -> AIBankProtocol:
-    return AIBankProtocol(Settings(mode=Mode.MOCK, protocol=Protocol.AIBANK))
+def _new_protocol() -> AP2Protocol:
+    return AP2Protocol(Settings(mode=Mode.MOCK, protocol=Protocol.AP2, ap2_settlement=SettlementRail.AIBANK))
 
 
-async def test_unpaid_request_returns_402() -> None:
+async def test_unpaid_request_returns_402_with_cart_mandate_offering_aibank() -> None:
     protocol = _new_protocol()
     app = _build_app(protocol, pay_to=AIBankCredential().account_id)
     port = _free_port()
@@ -61,12 +64,14 @@ async def test_unpaid_request_returns_402() -> None:
         async with httpx.AsyncClient() as client:
             response = await client.post(f"http://127.0.0.1:{port}/echo", json={"hello": "world"})
         assert response.status_code == 402
-        assert response.json()["accepts"]["scheme"] == "aibank-transfer"
+        body = response.json()
+        method_data = body["cartMandate"]["contents"]["payment_request"]["method_data"][0]
+        assert method_data["supported_methods"] == "https://agent-commerce.dev/pay/aibank-transfer"
     finally:
         server.should_exit = True
 
 
-async def test_paid_request_settles_and_returns_result() -> None:
+async def test_paid_request_settles_via_aibank_and_returns_result() -> None:
     protocol = _new_protocol()
     seller = AIBankCredential()
     buyer = AIBankCredential()
@@ -86,19 +91,18 @@ async def test_paid_request_settles_and_returns_result() -> None:
         assert result.status_code == 200
         assert result.json_body == {"echo": {"hello": "world"}}
         assert result.receipt is not None
-        assert result.receipt.protocol == "aibank"
+        assert result.receipt.protocol == "ap2"
         assert result.receipt.payer == buyer.account_id
         assert result.receipt.pay_to == seller.account_id
         assert str(result.receipt.amount_usd) == "0.001"
-        assert result.receipt.settlement_id.startswith("auth_")
+        assert result.receipt.settlement_id.startswith("pm_")
     finally:
         server.should_exit = True
 
 
-async def test_wrong_api_key_for_a_known_account_is_rejected() -> None:
-    """La cuenta queda "abierta" (trust-on-first-use) en la primera llamada
-    -- un segundo intento con el mismo account_id pero otro api_key tiene
-    que fallar, probando que el chequeo de credencial es real."""
+async def test_reusing_the_same_cart_mandate_twice_is_rejected() -> None:
+    """Mismo anti-replay que el riel x402 (`test_ap2_protocol_mock.py`),
+    ahora sobre AIBank."""
     protocol = _new_protocol()
     seller = AIBankCredential()
     buyer = AIBankCredential()
@@ -108,28 +112,31 @@ async def test_wrong_api_key_for_a_known_account_is_rejected() -> None:
 
     try:
         buyer_client = protocol.build_buyer_client(buyer)
-        try:
-            first = await buyer_client.request(
-                "POST", f"http://127.0.0.1:{port}/echo", json={"n": 1}
-            )
-        finally:
-            await buyer_client.aclose()
-        assert first.status_code == 200
+        cart_response = await buyer_client._http.post(f"http://127.0.0.1:{port}/echo", json={"n": 1})
+        assert cart_response.status_code == 402
+        from ap2.types.mandate import CartMandate
 
-        impostor = AIBankCredential(account_id=buyer.account_id, api_key="wrong-key")
-        impostor_client = protocol.build_buyer_client(impostor)
-        try:
-            with pytest.raises(Exception, match="invalid_credential"):
-                await impostor_client.request(
-                    "POST", f"http://127.0.0.1:{port}/echo", json={"n": 2}
-                )
-        finally:
-            await impostor_client.aclose()
+        from agent_commerce.payments.protocols.ap2_protocol import _AP2_PAYMENT_MANDATE_HEADER
+
+        cart_mandate = CartMandate.model_validate(cart_response.json()["cartMandate"])
+        header_value = buyer_client._build_payment_mandate_header(cart_mandate)
+
+        first = await buyer_client._http.post(
+            f"http://127.0.0.1:{port}/echo", json={"n": 1}, headers={_AP2_PAYMENT_MANDATE_HEADER: header_value}
+        )
+        second = await buyer_client._http.post(
+            f"http://127.0.0.1:{port}/echo", json={"n": 1}, headers={_AP2_PAYMENT_MANDATE_HEADER: header_value}
+        )
+        await buyer_client.aclose()
+
+        assert first.status_code == 200
+        assert second.status_code == 402
+        assert "cart_already_redeemed" in second.json()["error"]
     finally:
         server.should_exit = True
 
 
-async def test_each_call_authorizes_and_captures_independently() -> None:
+async def test_wrong_api_key_for_a_known_account_is_rejected() -> None:
     protocol = _new_protocol()
     seller = AIBankCredential()
     buyer = AIBankCredential()
@@ -141,12 +148,16 @@ async def test_each_call_authorizes_and_captures_independently() -> None:
         buyer_client = protocol.build_buyer_client(buyer)
         try:
             first = await buyer_client.request("POST", f"http://127.0.0.1:{port}/echo", json={"n": 1})
-            second = await buyer_client.request("POST", f"http://127.0.0.1:{port}/echo", json={"n": 2})
         finally:
             await buyer_client.aclose()
-
         assert first.status_code == 200
-        assert second.status_code == 200
-        assert first.receipt.settlement_id != second.receipt.settlement_id
+
+        impostor = AIBankCredential(account_id=buyer.account_id, api_key="wrong-key")
+        impostor_client = protocol.build_buyer_client(impostor)
+        try:
+            with pytest.raises(Exception, match="invalid_credential"):
+                await impostor_client.request("POST", f"http://127.0.0.1:{port}/echo", json={"n": 2})
+        finally:
+            await impostor_client.aclose()
     finally:
         server.should_exit = True

@@ -22,6 +22,19 @@ class Mode(str, Enum):
 class Protocol(str, Enum):
     X402 = "x402"
     AP2 = "ap2"
+
+
+class SettlementRail(str, Enum):
+    """Con qué riel liquida AP2 un mandato ya autorizado (RM-18): x402
+    (cripto, el único que existía) o aibank (banco propio). No aplica a
+    x402 "puro" (siempre se liquida a sí mismo). Ver `docs/roadmap.md`
+    RM-18 sobre por qué AIBank es un riel de AP2 y no un protocolo aparte:
+    AP2 ya está diseñado para ser agnóstico al riel de liquidación, y
+    pedirle a AIBank que "hable x402" directamente lo obligaría a
+    custodiar cripto y firmar como una wallet -- en ese punto ya sería
+    Circle, no un banco."""
+
+    X402 = "x402"
     AIBANK = "aibank"
 
 
@@ -36,6 +49,8 @@ class Settings(BaseSettings):
     mode: Mode = Mode.MOCK
     protocol: Protocol = Protocol.X402
     wallet_backend: WalletBackend = WalletBackend.LOCAL
+    # Solo aplica con protocol=ap2 -- ver `SettlementRail`.
+    ap2_settlement: SettlementRail = SettlementRail.X402
 
     # CAIP-2. Base Sepolia por defecto: es donde x402/Circle documentan sus
     # ejemplos de testnet con USDC, y coincide con la red que usa el

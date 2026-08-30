@@ -395,61 +395,72 @@ pendiente de eso; AIBank no depende de nadie externo y se implementó completo e
 
 ### AIBank -- implementación
 
-`Protocol.AIBANK` nuevo en `config.py`, con sus propias variables opcionales
-(`AGENT_COMMERCE_AIBANK_{BUYER,SELLER}_{ACCOUNT_ID,API_KEY}` -- sin valor, se generan efímeras al
-vuelo, mismo criterio que `LocalEoaSigner` sin `private_key`).
+Primer intento (descartado): un `Protocol.AIBANK` de primer nivel, junto a x402/AP2, con su propio
+`AIBankProtocol` standalone. Al revisarlo con el usuario surgió la pregunta correcta: ¿por qué no
+pedirle a AIBank que hable uno de los dos protocolos que ya existen? Respuesta corta: x402 (tal como
+está implementado, sobre el SDK real de Coinbase) está atado a `transferWithAuthorization` de USDC en
+EVM -- un banco "hablando x402" tendría que custodiar cripto y firmar como una wallet, o sea, dejaría
+de ser un banco y volvería a ser Circle. **AP2 en cambio SÍ está pensado para esto**: la especificación
+real de Google es agnóstica al riel de liquidación por diseño (el mandato Intent→Cart→Payment es solo
+la capa de autorización); que `AP2Protocol` liquide siempre vía x402 fue una simplificación de
+implementación de este proyecto (documentada desde RM-02), no un requisito de la especificación. Se
+refactorizó para que **AIBank sea el segundo riel de liquidación de AP2** (`Settings.ap2_settlement`),
+no un protocolo aparte -- más fiel al spec real y reusa toda la maquinaria de carrito/mandato ya
+construida y testeada.
 
-`payments/aibank_credential.py` -- `AIBankCredential` (`account_id` + `api_key`, con una property
-`address` que expone `account_id` para que el resto del framework -- CLI, dashboard -- que ya trata
-"`address`" como el identificador genérico de pagador/receptor siga funcionando sin cambios). A
-propósito **no implementa `WalletSigner`** (no hay firma, la prueba de pago es haber autenticado con
-éxito contra el banco).
+`config.py` -- `SettlementRail` (`x402`/`aibank`) + `Settings.ap2_settlement` (default `x402`, no
+rompe nada existente). `Protocol` vuelve a tener solo `x402`/`ap2` (sin `aibank` de primer nivel).
+Variables opcionales sin cambios (`AGENT_COMMERCE_AIBANK_{BUYER,SELLER}_{ACCOUNT_ID,API_KEY}` --
+efímeras si no se fijan, mismo criterio que `LocalEoaSigner` sin `private_key`).
 
-`payments/mock_aibank.py` -- `MockAIBank`, banco en memoria: `authorize`/`capture`/`get`/`refund`,
-auth de cuenta *trust-on-first-use* (la primera vez que se ve un `account_id` queda "abierta" con el
-`api_key` de esa llamada; llamadas siguientes necesitan el mismo `api_key`), idempotencia por
-`(account_id, idempotency_key)`. No existe un AIBank real contra el que liquidar en modo testnet
-todavía -- el día que exista un proveedor real que hable este contrato, se agrega un cliente HTTP
-equivalente a `facilitator_selection.py`.
+`payments/aibank_credential.py` (`AIBankCredential`) y `payments/mock_aibank.py` (`MockAIBank`,
+`authorize`/`capture`/`get`/`refund`, auth *trust-on-first-use*, idempotencia) **quedan intactos** --
+son los primitivos reales de "hacer negocios con el banco", reutilizables sea cual sea la capa que los
+invoque por encima. Se borró únicamente `payments/protocols/aibank_protocol.py` (el transporte HTTP
+402 standalone), absorbido dentro de `ap2_protocol.py`.
 
-`payments/protocols/aibank_protocol.py` -- `AIBankProtocol`: **a propósito no hereda
-`PaymentProtocol`** (esa ABC declara `build_buyer_client(signer: WalletSigner)`, y `AIBankCredential`
-no es un `WalletSigner` -- forzarlo habría sido la abstracción falsa que se decidió evitar más
-arriba). Implementa la misma forma por duck typing. Transporte: mismo idioma HTTP 402 + reintento que
-x402/AP2 (402 con `accepts`, header `X-AIBANK-PAYMENT` en el reintento con el `authorization_id`,
-header `X-AIBANK-SETTLEMENT` en la respuesta) -- el comprador autoriza+captura contra el banco antes
-de reintentar, en vez de firmar localmente.
+`payments/protocols/ap2_protocol.py` -- `AP2Protocol.__init__` arma `MockAIBank()` o el facilitator
+x402 según `settings.ap2_settlement`. `_AP2SellerState.issue_cart`/`redeem` y
+`_AP2BuyerClient._build_payment_mandate_header` branchean por riel: mismo `CartMandate`/
+`PaymentMandate`, pero `method_data`/`payment_response.details` describen un `PaymentRequirements` de
+x402 o un `{payTo, price}` de AIBank según corresponda. La firma del `CartMandate`
+(`merchant_authorization`, identidad del comerciante) es la misma para los dos rieles -- no depende de
+cómo se cobra. La firma del `PaymentMandate` (`user_authorization`, consentimiento del comprador) SÍ
+depende del riel: con x402 sigue siendo una firma EIP-191 real sobre el contenido exacto del mandato;
+con AIBank no hay firma en ese modelo (ver `aibank_credential.py`), así que el campo lleva un marcador
+no vacío y la garantía real la da el vendedor verificando la autorización de vuelta contra
+`MockAIBank` (estado `captured`, `pay_to`/monto coinciden) -- simplificación real y documentada en el
+docstring del módulo, análoga a las que ya tenía AP2 desde RM-02.
 
-`payments/factory.py` -- `get_aibank_protocol`/`build_payer_credential` nuevos, separados a propósito
-de `get_payment_protocol`/`build_wallet_signer` (que siguen intactos, sin tocar) en vez de forzar un
-tipo de retorno `Union` mentiroso en las funciones existentes. `cli/main.py`
-(`serve-example`/`call`/`demo`) y `examples/agent_to_agent_demo.py` actualizados para usar
-`build_payer_credential` y despachar a `get_aibank_protocol` cuando corresponde -- unos pocos
-`# type: ignore[arg-type]` puntuales y comentados en los sitios donde de verdad se pasa una
-`AIBankCredential` donde el tipo declarado sigue siendo `WalletSigner` (duck typing real que mypy no
-puede expresar sin generics, mismo criterio que otros `type: ignore` ya existentes en el proyecto).
+`build_buyer_client` de `AP2Protocol` **ensancha** el parámetro heredado de `PaymentProtocol`
+(`signer: WalletSigner` → `signer: PayerCredential`, un nuevo alias `WalletSigner | AIBankCredential`
+en `protocols/base.py`) en vez de angostarlo a un tipo no relacionado como hacía el diseño standalone
+-- ensanchar un override es compatible con Liskov, así que **no hizo falta ningún
+`# type: ignore[override]`**; el único ignore que quedó en todo el refactor es uno solo, en
+`client/session.py`, en el punto de paso genérico donde `protocol`/`signer` llegan tipados por el ABC
+base y no por la subclase concreta (comentado explicando por qué). `payments/factory.py` ganó
+`build_payer_credential` (delega en `build_wallet_signer` salvo `ap2_settlement=aibank`);
+`get_payment_protocol`/`build_wallet_signer` quedaron sin tocar. `cli/main.py`
+(`serve-example`/`call`/`demo`) y `examples/agent_to_agent_demo.py` ganaron `--ap2-settlement`.
 
-**Limitación conocida y deliberada**: `MockAIBank` vive en memoria por proceso. Eso alcanza para
-`agent-commerce demo --protocol aibank` (vendedor y comprador comparten la misma instancia de
-`AIBankProtocol` dentro del mismo proceso Python) y para los tests, pero **no** para encadenar
-`agent-commerce serve-example --protocol aibank` (un proceso) con `agent-commerce call --protocol
-aibank` desde otra terminal (proceso separado, banco en memoria separado) -- a diferencia de x402,
-donde solo el facilitator del lado vendedor importa (el comprador únicamente firma), acá el
-comprador llama directo al banco para autorizar+capturar. No se resolvió con más infraestructura
-(un servidor HTTP real para el mock) porque nadie lo necesita todavía -- se documenta en vez de
-ocultarlo.
+**Limitación conocida y deliberada, sin cambios respecto al diseño anterior**: `MockAIBank` vive en
+memoria por proceso -- alcanza para `agent-commerce demo --protocol ap2 --ap2-settlement aibank`
+(vendedor y comprador comparten la misma instancia de `AP2Protocol` dentro del mismo proceso Python) y
+para los tests, pero no para encadenar `serve-example`+`call` como dos procesos separados (a
+diferencia de x402/AP2 sobre x402, donde solo el facilitator del lado vendedor importa). No se
+resolvió con más infraestructura porque nadie lo necesita todavía.
 
-Verificado en esta sesión: 10 tests nuevos (6 de `MockAIBank` directo, 4 del protocolo sobre HTTP
-real con `uvicorn`) -- 402 sin pago, pago liquidado con recibo, api key equivocada rechazada,
-llamadas independientes con `settlement_id` distintos. `uv run agent-commerce demo --protocol
-aibank --mode mock` corrido de punta a punta de verdad (no test): resumen devuelto + recibo con
-`protocolo=aibank`, `id de liquidación=auth_...`. Suite completa 136/136, `ruff`/`mypy` limpios en
-todo `src`.
+Verificado tras el refactor: 4 tests nuevos en `tests/payments/protocols/test_ap2_aibank_settlement.py`
+(402 ofreciendo el método `aibank-transfer`, pago liquidado con recibo, anti-replay de cart_id --
+mismo caso que ya cubría el riel x402 --, api key equivocada rechazada) + los 6 de `MockAIBank` sin
+cambios + los 3 de `test_ap2_protocol_mock.py` (riel x402) intactos, sin modificar. `agent-commerce
+demo --protocol ap2 --ap2-settlement aibank --mode mock` corrido de punta a punta de verdad: recibo
+con `protocolo=ap2`, `red=aibank:mock`. `agent-commerce demo --protocol x402` y `--protocol ap2` (riel
+x402 default) confirmados sin regresión. Suite completa 136/136, `ruff`/`mypy` limpios en todo `src`.
 
-**Pendiente, explícitamente fuera de esta pasada** (para no mezclar con lo de arriba): exponer
-`aibank` como opción en el dashboard (selector de protocolo + diálogo de credenciales, mismo patrón
-que RM-19 hizo para el backend de wallet) -- hoy solo funciona vía CLI/framework, igual que x402/AP2
-antes de RM-07/08.
+**Pendiente, explícitamente fuera de esta pasada**: exponer `ap2_settlement=aibank` como opción en el
+dashboard (mismo patrón que RM-19 hizo para el backend de wallet) -- hoy solo funciona vía
+CLI/framework, igual que x402/AP2 antes de RM-07/08.
 
 <a id="rm-19"></a>
 

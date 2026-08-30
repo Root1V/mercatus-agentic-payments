@@ -16,7 +16,7 @@ from pathlib import Path
 
 import typer
 
-from agent_commerce.config import Mode, Protocol, Settings
+from agent_commerce.config import Mode, Protocol, Settings, SettlementRail
 
 app = typer.Typer(help="Framework de doble cara para agentic commerce (x402 + AP2).")
 catalog_app = typer.Typer(help="Consultar el catálogo de servicios.")
@@ -40,27 +40,24 @@ def _ensure_examples_importable() -> None:
 @app.command("serve-example")
 def serve_example(
     protocol: Protocol = typer.Option(Protocol.X402, "--protocol"),
+    ap2_settlement: SettlementRail = typer.Option(
+        SettlementRail.X402, "--ap2-settlement", help="Solo con --protocol ap2: riel de liquidación (RM-18)."
+    ),
     mode: Mode = typer.Option(Mode.MOCK, "--mode"),
     port: int = typer.Option(8901, "--port"),
 ) -> None:
     """Levanta el vendedor de ejemplo (text-summarizer) monetizado en :port."""
     import uvicorn
 
-    from agent_commerce.payments.factory import (
-        build_payer_credential,
-        get_aibank_protocol,
-        get_payment_protocol,
-    )
+    from agent_commerce.payments.factory import build_payer_credential, get_payment_protocol
 
     _ensure_examples_importable()
     from examples.seller_text_summarizer.app import build_app
 
-    settings = Settings(protocol=protocol, mode=mode)
+    settings = Settings(protocol=protocol, mode=mode, ap2_settlement=ap2_settlement)
     seller_signer = build_payer_credential(role="seller", settings=settings)
-    payment_protocol = (
-        get_aibank_protocol(settings) if protocol is Protocol.AIBANK else get_payment_protocol(settings)
-    )
-    fastapi_app = build_app(protocol=payment_protocol, pay_to=seller_signer.address)  # type: ignore[arg-type]
+    payment_protocol = get_payment_protocol(settings)
+    fastapi_app = build_app(protocol=payment_protocol, pay_to=seller_signer.address)
 
     typer.echo(f"pay_to={seller_signer.address} protocol={protocol.value} mode={mode.value} port={port}")
     uvicorn.run(fastapi_app, host="127.0.0.1", port=port)
@@ -69,6 +66,9 @@ def serve_example(
 @app.command("demo")
 def demo(
     protocol: Protocol = typer.Option(Protocol.X402, "--protocol"),
+    ap2_settlement: SettlementRail = typer.Option(
+        SettlementRail.X402, "--ap2-settlement", help="Solo con --protocol ap2: riel de liquidación (RM-18)."
+    ),
     mode: Mode = typer.Option(Mode.MOCK, "--mode"),
     port: int = typer.Option(8901, "--port"),
 ) -> None:
@@ -76,7 +76,7 @@ def demo(
     _ensure_examples_importable()
     from examples.agent_to_agent_demo import run_demo
 
-    asyncio.run(run_demo(protocol.value, mode.value, port))
+    asyncio.run(run_demo(protocol.value, mode.value, port, ap2_settlement=ap2_settlement.value))
 
 
 @catalog_app.command("list")
@@ -121,31 +121,24 @@ def call(
     capability: str = typer.Argument(..., help="Palabra clave a buscar en el catálogo, p. ej. 'summarize'"),
     text: str = typer.Option(..., "--text", help="Texto a enviar como payload {'text': ...}"),
     protocol: Protocol = typer.Option(Protocol.X402, "--protocol"),
+    ap2_settlement: SettlementRail = typer.Option(
+        SettlementRail.X402, "--ap2-settlement", help="Solo con --protocol ap2: riel de liquidación (RM-18)."
+    ),
     mode: Mode = typer.Option(Mode.MOCK, "--mode"),
     catalog_path: Path = typer.Option(_DEFAULT_CATALOG_PATH, "--catalog-path"),
 ) -> None:
     """Como agente comprador: descubre y paga un servicio del catálogo por `capability`."""
     from agent_commerce.catalog.registry import InMemoryServiceRegistry
     from agent_commerce.client.paying_agent import PayingAgent
-    from agent_commerce.payments.factory import (
-        build_payer_credential,
-        get_aibank_protocol,
-        get_payment_protocol,
-    )
+    from agent_commerce.payments.factory import build_payer_credential, get_payment_protocol
 
     async def _run() -> None:
-        settings = Settings(protocol=protocol, mode=mode)
+        settings = Settings(protocol=protocol, mode=mode, ap2_settlement=ap2_settlement)
         buyer_signer = build_payer_credential(role="buyer", settings=settings)
-        payment_protocol = (
-            get_aibank_protocol(settings) if protocol is Protocol.AIBANK else get_payment_protocol(settings)
-        )
+        payment_protocol = get_payment_protocol(settings)
         catalog = InMemoryServiceRegistry.from_json_file(catalog_path)
 
-        async with PayingAgent(
-            protocol=payment_protocol,  # type: ignore[arg-type]
-            signer=buyer_signer,  # type: ignore[arg-type]
-            catalog=catalog,
-        ) as agent:
+        async with PayingAgent(protocol=payment_protocol, signer=buyer_signer, catalog=catalog) as agent:
             result = await agent.call_service(capability, {"text": text})
 
         typer.echo(f"resultado: {result.data}")

@@ -26,12 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import uvicorn
 
 from agent_commerce.catalog.registry import InMemoryServiceRegistry
-from agent_commerce.config import Mode, Protocol, Settings
-from agent_commerce.payments.factory import (
-    build_payer_credential,
-    get_aibank_protocol,
-    get_payment_protocol,
-)
+from agent_commerce.config import Mode, Protocol, Settings, SettlementRail
+from agent_commerce.payments.factory import build_payer_credential, get_payment_protocol
 from examples.buyer_research_agent.agent import ResearchAgent
 from examples.seller_text_summarizer.app import build_app
 
@@ -53,25 +49,28 @@ def _run_seller(app, host: str, port: int) -> uvicorn.Server:
     return server
 
 
-async def run_demo(protocol_name: str, mode_name: str, port: int) -> None:
-    settings = Settings(protocol=Protocol(protocol_name), mode=Mode(mode_name))
-    is_aibank = settings.protocol is Protocol.AIBANK
-
-    # Para AIBank, vendedor y comprador tienen que compartir la MISMA
-    # instancia de `AIBankProtocol` (y por lo tanto el mismo `MockAIBank` en
-    # memoria): a diferencia de x402/AP2 (donde solo el facilitator del lado
-    # vendedor importa -- el comprador únicamente firma), acá el comprador
-    # llama directo al banco para autorizar+capturar, así que si tuviera su
-    # propio banco en memoria por separado el vendedor nunca encontraría esa
-    # autorización. Por eso una sola llamada a `get_aibank_protocol`, nunca
-    # dos. x402/AP2 sí toleran instancias separadas por rol (ver
-    # `get_payment_protocol`).
-    seller_protocol = get_aibank_protocol(settings) if is_aibank else get_payment_protocol(settings)
-    buyer_protocol = seller_protocol if is_aibank else get_payment_protocol(settings)
+async def run_demo(
+    protocol_name: str, mode_name: str, port: int, *, ap2_settlement: str = "x402"
+) -> None:
+    settings = Settings(
+        protocol=Protocol(protocol_name), mode=Mode(mode_name), ap2_settlement=SettlementRail(ap2_settlement)
+    )
+    # Con ap2_settlement=aibank, vendedor y comprador tienen que compartir la
+    # MISMA instancia de `AP2Protocol` (y por lo tanto el mismo `MockAIBank`
+    # en memoria): a diferencia de x402 puro (donde solo el facilitator del
+    # lado vendedor importa -- el comprador únicamente firma), en ese riel el
+    # comprador llama directo al banco para autorizar+capturar, así que si
+    # tuviera su propio banco en memoria por separado el vendedor nunca
+    # encontraría esa autorización. Por eso una sola llamada a
+    # `get_payment_protocol`, nunca dos, cuando el riel es aibank -- x402
+    # puro sí tolera instancias separadas por rol.
+    shares_state = settings.protocol is Protocol.AP2 and settings.ap2_settlement is SettlementRail.AIBANK
+    seller_protocol = get_payment_protocol(settings)
+    buyer_protocol = seller_protocol if shares_state else get_payment_protocol(settings)
     seller_signer = build_payer_credential(role="seller", settings=settings)
     buyer_signer = build_payer_credential(role="buyer", settings=settings)
 
-    app = build_app(protocol=seller_protocol, pay_to=seller_signer.address)  # type: ignore[arg-type]
+    app = build_app(protocol=seller_protocol, pay_to=seller_signer.address)
     server = _run_seller(app, "127.0.0.1", port)
 
     catalog = InMemoryServiceRegistry.from_json_file(
@@ -87,11 +86,7 @@ async def run_demo(protocol_name: str, mode_name: str, port: int) -> None:
     print(f"comprador       = {buyer_signer.address}")
     print()
 
-    async with ResearchAgent(
-        protocol=buyer_protocol,  # type: ignore[arg-type]
-        signer=buyer_signer,  # type: ignore[arg-type]
-        catalog=catalog,
-    ) as agent:
+    async with ResearchAgent(protocol=buyer_protocol, signer=buyer_signer, catalog=catalog) as agent:
         result = await agent.summarize(_TEXT, max_sentences=2)
 
     print("--- resultado de negocio ---")
@@ -114,11 +109,17 @@ async def run_demo(protocol_name: str, mode_name: str, port: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--protocol", choices=["x402", "ap2", "aibank"], default="x402")
+    parser.add_argument("--protocol", choices=["x402", "ap2"], default="x402")
+    parser.add_argument(
+        "--ap2-settlement",
+        choices=["x402", "aibank"],
+        default="x402",
+        help="Solo con --protocol ap2: riel de liquidación (RM-18).",
+    )
     parser.add_argument("--mode", choices=["mock", "testnet"], default="mock")
     parser.add_argument("--port", type=int, default=8901)
     args = parser.parse_args()
-    asyncio.run(run_demo(args.protocol, args.mode, args.port))
+    asyncio.run(run_demo(args.protocol, args.mode, args.port, ap2_settlement=args.ap2_settlement))
 
 
 if __name__ == "__main__":

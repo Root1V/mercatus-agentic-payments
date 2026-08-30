@@ -1,6 +1,6 @@
 """Cobertura directa de `MockAIBank` (RM-18): autorizar/capturar/consultar/
-reembolsar, sin pasar por el transporte HTTP del protocolo -- ver
-`tests/payments/protocols/test_aibank_protocol_mock.py` para eso."""
+reembolsar, sin pasar por el transporte de AP2 -- ver
+`tests/payments/protocols/test_ap2_aibank_settlement.py` para eso."""
 
 from __future__ import annotations
 
