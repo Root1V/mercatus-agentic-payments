@@ -330,7 +330,7 @@ auth-service/gateway como servidor real, mismo patrón que RM-14).
 <a id="rm-18"></a>
 
 ## RM-18 — Otros rieles de pago (tarjeta emitida por la plataforma, banco propio)
-**Estado:** ⬜ Backlog
+**Estado:** 🟡 Parcial -- AIBank implementado y verificado; tarjetas pendientes de credenciales
 
 Hoy el framework solo liquida sobre rieles cripto (x402 directo, AP2 delegando en x402) vía el
 puerto `WalletSigner` (`payments/wallets/`), diseñado específicamente alrededor de firma
@@ -390,7 +390,66 @@ por país, solo qué credencial se resuelve para ese agente.
 
 Sin credenciales de ninguno de estos proveedores todavía -- como con Circle (RM-06) y Prometheus
 (RM-11), cualquier verificación real de este trabajo va a necesitar que el usuario provea sus
-propias credenciales de sandbox y autorice cada paso explícitamente.
+propias credenciales de sandbox y autorice cada paso explícitamente. El riel de tarjetas queda
+pendiente de eso; AIBank no depende de nadie externo y se implementó completo en esta misma sesión.
+
+### AIBank -- implementación
+
+`Protocol.AIBANK` nuevo en `config.py`, con sus propias variables opcionales
+(`AGENT_COMMERCE_AIBANK_{BUYER,SELLER}_{ACCOUNT_ID,API_KEY}` -- sin valor, se generan efímeras al
+vuelo, mismo criterio que `LocalEoaSigner` sin `private_key`).
+
+`payments/aibank_credential.py` -- `AIBankCredential` (`account_id` + `api_key`, con una property
+`address` que expone `account_id` para que el resto del framework -- CLI, dashboard -- que ya trata
+"`address`" como el identificador genérico de pagador/receptor siga funcionando sin cambios). A
+propósito **no implementa `WalletSigner`** (no hay firma, la prueba de pago es haber autenticado con
+éxito contra el banco).
+
+`payments/mock_aibank.py` -- `MockAIBank`, banco en memoria: `authorize`/`capture`/`get`/`refund`,
+auth de cuenta *trust-on-first-use* (la primera vez que se ve un `account_id` queda "abierta" con el
+`api_key` de esa llamada; llamadas siguientes necesitan el mismo `api_key`), idempotencia por
+`(account_id, idempotency_key)`. No existe un AIBank real contra el que liquidar en modo testnet
+todavía -- el día que exista un proveedor real que hable este contrato, se agrega un cliente HTTP
+equivalente a `facilitator_selection.py`.
+
+`payments/protocols/aibank_protocol.py` -- `AIBankProtocol`: **a propósito no hereda
+`PaymentProtocol`** (esa ABC declara `build_buyer_client(signer: WalletSigner)`, y `AIBankCredential`
+no es un `WalletSigner` -- forzarlo habría sido la abstracción falsa que se decidió evitar más
+arriba). Implementa la misma forma por duck typing. Transporte: mismo idioma HTTP 402 + reintento que
+x402/AP2 (402 con `accepts`, header `X-AIBANK-PAYMENT` en el reintento con el `authorization_id`,
+header `X-AIBANK-SETTLEMENT` en la respuesta) -- el comprador autoriza+captura contra el banco antes
+de reintentar, en vez de firmar localmente.
+
+`payments/factory.py` -- `get_aibank_protocol`/`build_payer_credential` nuevos, separados a propósito
+de `get_payment_protocol`/`build_wallet_signer` (que siguen intactos, sin tocar) en vez de forzar un
+tipo de retorno `Union` mentiroso en las funciones existentes. `cli/main.py`
+(`serve-example`/`call`/`demo`) y `examples/agent_to_agent_demo.py` actualizados para usar
+`build_payer_credential` y despachar a `get_aibank_protocol` cuando corresponde -- unos pocos
+`# type: ignore[arg-type]` puntuales y comentados en los sitios donde de verdad se pasa una
+`AIBankCredential` donde el tipo declarado sigue siendo `WalletSigner` (duck typing real que mypy no
+puede expresar sin generics, mismo criterio que otros `type: ignore` ya existentes en el proyecto).
+
+**Limitación conocida y deliberada**: `MockAIBank` vive en memoria por proceso. Eso alcanza para
+`agent-commerce demo --protocol aibank` (vendedor y comprador comparten la misma instancia de
+`AIBankProtocol` dentro del mismo proceso Python) y para los tests, pero **no** para encadenar
+`agent-commerce serve-example --protocol aibank` (un proceso) con `agent-commerce call --protocol
+aibank` desde otra terminal (proceso separado, banco en memoria separado) -- a diferencia de x402,
+donde solo el facilitator del lado vendedor importa (el comprador únicamente firma), acá el
+comprador llama directo al banco para autorizar+capturar. No se resolvió con más infraestructura
+(un servidor HTTP real para el mock) porque nadie lo necesita todavía -- se documenta en vez de
+ocultarlo.
+
+Verificado en esta sesión: 10 tests nuevos (6 de `MockAIBank` directo, 4 del protocolo sobre HTTP
+real con `uvicorn`) -- 402 sin pago, pago liquidado con recibo, api key equivocada rechazada,
+llamadas independientes con `settlement_id` distintos. `uv run agent-commerce demo --protocol
+aibank --mode mock` corrido de punta a punta de verdad (no test): resumen devuelto + recibo con
+`protocolo=aibank`, `id de liquidación=auth_...`. Suite completa 136/136, `ruff`/`mypy` limpios en
+todo `src`.
+
+**Pendiente, explícitamente fuera de esta pasada** (para no mezclar con lo de arriba): exponer
+`aibank` como opción en el dashboard (selector de protocolo + diálogo de credenciales, mismo patrón
+que RM-19 hizo para el backend de wallet) -- hoy solo funciona vía CLI/framework, igual que x402/AP2
+antes de RM-07/08.
 
 <a id="rm-19"></a>
 

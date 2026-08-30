@@ -46,15 +46,21 @@ def serve_example(
     """Levanta el vendedor de ejemplo (text-summarizer) monetizado en :port."""
     import uvicorn
 
-    from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
+    from agent_commerce.payments.factory import (
+        build_payer_credential,
+        get_aibank_protocol,
+        get_payment_protocol,
+    )
 
     _ensure_examples_importable()
     from examples.seller_text_summarizer.app import build_app
 
     settings = Settings(protocol=protocol, mode=mode)
-    seller_signer = build_wallet_signer(role="seller", settings=settings)
-    payment_protocol = get_payment_protocol(settings)
-    fastapi_app = build_app(protocol=payment_protocol, pay_to=seller_signer.address)
+    seller_signer = build_payer_credential(role="seller", settings=settings)
+    payment_protocol = (
+        get_aibank_protocol(settings) if protocol is Protocol.AIBANK else get_payment_protocol(settings)
+    )
+    fastapi_app = build_app(protocol=payment_protocol, pay_to=seller_signer.address)  # type: ignore[arg-type]
 
     typer.echo(f"pay_to={seller_signer.address} protocol={protocol.value} mode={mode.value} port={port}")
     uvicorn.run(fastapi_app, host="127.0.0.1", port=port)
@@ -121,15 +127,25 @@ def call(
     """Como agente comprador: descubre y paga un servicio del catálogo por `capability`."""
     from agent_commerce.catalog.registry import InMemoryServiceRegistry
     from agent_commerce.client.paying_agent import PayingAgent
-    from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
+    from agent_commerce.payments.factory import (
+        build_payer_credential,
+        get_aibank_protocol,
+        get_payment_protocol,
+    )
 
     async def _run() -> None:
         settings = Settings(protocol=protocol, mode=mode)
-        buyer_signer = build_wallet_signer(role="buyer", settings=settings)
-        payment_protocol = get_payment_protocol(settings)
+        buyer_signer = build_payer_credential(role="buyer", settings=settings)
+        payment_protocol = (
+            get_aibank_protocol(settings) if protocol is Protocol.AIBANK else get_payment_protocol(settings)
+        )
         catalog = InMemoryServiceRegistry.from_json_file(catalog_path)
 
-        async with PayingAgent(protocol=payment_protocol, signer=buyer_signer, catalog=catalog) as agent:
+        async with PayingAgent(
+            protocol=payment_protocol,  # type: ignore[arg-type]
+            signer=buyer_signer,  # type: ignore[arg-type]
+            catalog=catalog,
+        ) as agent:
             result = await agent.call_service(capability, {"text": text})
 
         typer.echo(f"resultado: {result.data}")
