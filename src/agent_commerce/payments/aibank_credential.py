@@ -5,9 +5,10 @@ custodio criptográfico ni firma: la prueba de pago es haber autenticado con
 éxito contra el banco (autorizar + capturar una transferencia) con la API
 key de la cuenta, no una firma EIP-712/EIP-191. Por eso esta credencial NO
 implementa `WalletSigner` -- forzarla en ese molde sería una abstracción
-falsa (ver `docs/roadmap.md` RM-18). `AIBankProtocol` es, a propósito, un
-adaptador de protocolo de pago independiente de `PaymentProtocol`, con su
-propio tipo de credencial.
+falsa (ver `docs/roadmap.md` RM-18). AIBank es un segundo riel de
+liquidación de `AP2Protocol` (`Settings.ap2_settlement`,
+`payments/protocols/ap2_protocol.py`), no un `PaymentProtocol` aparte: AP2
+ya está diseñado para ser agnóstico al riel real de pago.
 """
 
 from __future__ import annotations

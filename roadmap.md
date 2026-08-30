@@ -23,6 +23,6 @@ Estado: ✅ Hecho · 🟡 Parcial · ⬜ Backlog
 | [RM-15](docs/roadmap.md#rm-15) | Frontend del playground | ✅ Hecho | Chat + panel de traza (pensamiento, tool, pago, respuesta) |
 | [RM-16](docs/roadmap.md#rm-16) | Playground: producción | ⬜ Backlog | Streaming, manejo de fallos visible, docs de despliegue de Prometheus |
 | [RM-17](docs/roadmap.md#rm-17) | Configurar LLM desde el dashboard | ✅ Hecho | Conectar Prometheus (URLs, credenciales, modelos habilitados) sin editar `.env` |
-| [RM-18](docs/roadmap.md#rm-18) | Otros rieles de pago (tarjeta emitida por la plataforma, banco propio) | 🟡 Parcial | AIBank implementado de punta a punta (`protocol=aibank`, CLI + tests); tarjetas vía emisor programático pendiente de credenciales sandbox del usuario |
+| [RM-18](docs/roadmap.md#rm-18) | Otros rieles de pago (tarjeta emitida por la plataforma, banco propio) | 🟡 Parcial | AIBank implementado como segundo riel de liquidación de AP2 (`ap2_settlement=aibank`, CLI + tests); tarjetas vía emisor programático pendiente de credenciales sandbox del usuario |
 | [RM-19](docs/roadmap.md#rm-19) | Configurar wallet del comprador desde el dashboard | ✅ Hecho | Elegir backend local/Circle (API key, entity secret, wallet ID) desde "Probar comprador", sin editar `.env` ni reiniciar el proceso |
 | [RM-20](docs/roadmap.md#rm-20) | Rebranding del dashboard a "Mercatus" | ✅ Hecho | Título, sidebar y login con el nombre "Mercatus"; ícono/favicon originales sin cambios |

@@ -14,8 +14,7 @@ from agent_commerce.client.paying_agent import PayingAgent, ServiceCallResult
 
 if TYPE_CHECKING:
     from agent_commerce.catalog.registry import ServiceRegistry
-    from agent_commerce.payments.protocols.base import PaymentProtocol
-    from agent_commerce.payments.wallets.base import WalletSigner
+    from agent_commerce.payments.protocols.base import PayerCredential, PaymentProtocol
 
 
 class ResearchAgent:
@@ -23,7 +22,7 @@ class ResearchAgent:
         self,
         *,
         protocol: PaymentProtocol,
-        signer: WalletSigner,
+        signer: PayerCredential,
         catalog: ServiceRegistry,
     ) -> None:
         self._paying_agent = PayingAgent(protocol=protocol, signer=signer, catalog=catalog)

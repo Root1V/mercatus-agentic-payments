@@ -16,8 +16,11 @@ from .session import build_buyer_client
 if TYPE_CHECKING:
     from agent_commerce.catalog.models import ServiceListing
     from agent_commerce.catalog.registry import ServiceRegistry
-    from agent_commerce.payments.protocols.base import PaymentProtocol, PaymentReceipt
-    from agent_commerce.payments.wallets.base import WalletSigner
+    from agent_commerce.payments.protocols.base import (
+        PayerCredential,
+        PaymentProtocol,
+        PaymentReceipt,
+    )
 
 
 class NoMatchingServiceError(LookupError):
@@ -40,7 +43,7 @@ class PayingAgent:
         self,
         *,
         protocol: PaymentProtocol,
-        signer: WalletSigner,
+        signer: PayerCredential,
         catalog: ServiceRegistry,
     ) -> None:
         self._protocol = protocol

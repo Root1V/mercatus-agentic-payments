@@ -17,7 +17,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from agent_commerce.payments.aibank_credential import AIBankCredential
     from agent_commerce.payments.wallets.base import WalletSigner
+
+    # Credencial de comprador, agnóstica de riel (RM-18): `WalletSigner` para
+    # x402 y para AP2 liquidado sobre x402; `AIBankCredential` para AP2
+    # liquidado sobre AIBank (`Settings.ap2_settlement`). `AP2Protocol` es el
+    # único `PaymentProtocol` cuyo `build_buyer_client` acepta ambas --
+    # ensancha el parámetro del método, nunca lo angosta, así que sigue
+    # siendo un override válido de este ABC.
+    PayerCredential = WalletSigner | AIBankCredential
 
 
 @dataclass
