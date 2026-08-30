@@ -38,7 +38,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import uvicorn
@@ -53,14 +53,17 @@ from agent_commerce.auth.router import router as auth_router
 from agent_commerce.catalog.models import ServiceListing
 from agent_commerce.catalog.registry import InMemoryServiceRegistry
 from agent_commerce.client.paying_agent import NoMatchingServiceError, PayingAgent
-from agent_commerce.config import Protocol, Settings, get_settings
+from agent_commerce.config import Protocol, Settings, SettlementRail, get_settings
 from agent_commerce.db.models import UserModel
 from agent_commerce.db.session import get_db
 from agent_commerce.llm.client import LLMClientError, PrometheusLLMClient
-from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
-from agent_commerce.payments.wallets.base import WalletSigner
+from agent_commerce.payments.aibank_credential import AIBankCredential
+from agent_commerce.payments.factory import build_payer_credential, get_payment_protocol
 from agent_commerce.payments.wallets.circle_wallet import CircleWalletSigner
 from agent_commerce.payments.wallets.local_eoa import LocalEoaSigner
+
+if TYPE_CHECKING:
+    from agent_commerce.payments.protocols.base import PayerCredential
 
 from .adapters.sql_agent_store import SqlAgentStore
 from .adapters.sql_catalog_store import SqlCatalogStore
@@ -156,11 +159,15 @@ class UpdateLlmSettingsRequest(BaseModel):
 
 
 class UpdateWalletSettingsRequest(BaseModel):
-    backend: str  # "local" | "circle"
+    backend: str  # "local" | "circle" | "aibank"
     circle_api_key: str | None = None
     # None = conservar el secreto ya guardado (para poder editar el resto sin reescribirlo).
     circle_entity_secret: str | None = None
     circle_wallet_id: str | None = None
+    # AIBank (RM-18): ambos opcionales, `AIBankCredential` genera una cuenta
+    # efímera si se dejan vacíos.
+    aibank_account_id: str | None = None
+    aibank_api_key: str | None = None
 
 
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
@@ -238,14 +245,16 @@ class _LlmClientHolder:
 
 
 def _wallet_settings_to_dict(settings_row: WalletSettings) -> dict[str, Any]:
-    # El API key de Circle NUNCA se devuelve: autentica solo (como un
-    # password), no es un identificador público como el `client_id` de
-    # OAuth2 -- mismo tratamiento que `circle_entity_secret`.
+    # El API key de Circle y el de AIBank NUNCA se devuelven: autentican
+    # solos (como un password), no son identificadores públicos como el
+    # `client_id` de OAuth2 -- mismo tratamiento que `circle_entity_secret`.
     return {
         "backend": settings_row.backend,
         "has_circle_api_key": settings_row.circle_api_key is not None,
         "has_circle_entity_secret": settings_row.circle_entity_secret is not None,
         "circle_wallet_id": settings_row.circle_wallet_id,
+        "aibank_account_id": settings_row.aibank_account_id,
+        "has_aibank_api_key": settings_row.aibank_api_key is not None,
         "updated_at": settings_row.updated_at.isoformat(),
     }
 
@@ -254,13 +263,14 @@ _WalletSignerKey = tuple[str, ...]
 
 
 class _WalletSignerHolder:
-    """Misma idea que `_LlmClientHolder` pero para el `WalletSigner` del
-    COMPRADOR: se reconstruye solo cuando cambia la configuración efectiva
+    """Misma idea que `_LlmClientHolder` pero para la credencial del
+    COMPRADOR (`WalletSigner` o, con `backend=aibank`, `AIBankCredential` --
+    RM-18): se reconstruye solo cuando cambia la configuración efectiva
     (fila de `wallet_settings` si existe, si no `Settings.wallet_backend` de
     entorno) -- así una wallet Circle no vuelve a pedir su dirección por red
     en cada request, solo la primera vez que se usa esa configuración."""
 
-    def __init__(self, signer: WalletSigner | None) -> None:
+    def __init__(self, signer: PayerCredential | None) -> None:
         self.signer = signer
         self.key: _WalletSignerKey | None = None
 
@@ -319,11 +329,26 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         sys.path.insert(0, repo_root_str)
     from examples.seller_text_summarizer.app import build_app as build_seller_app
 
+    # `settings.ap2_settlement` (RM-18: x402 o aibank) queda fijo para toda
+    # la vida del proceso -- es una propiedad de la instancia de
+    # `AP2Protocol` que arma `mount_seller` acá abajo (el mismo objeto que
+    # después usa el comprador vía `protocols["ap2"]`), no algo reconfigurable
+    # en caliente sin remontar el servidor del vendedor. Para cambiarlo hay
+    # que reiniciar el dashboard con `AGENT_COMMERCE_AP2_SETTLEMENT=aibank`.
     protocols = {
         name: get_payment_protocol(settings.model_copy(update={"protocol": Protocol(name)}))
         for name in _PROTOCOL_NAMES
     }
-    seller_signers = {name: build_wallet_signer(role="seller", settings=settings) for name in _PROTOCOL_NAMES}
+    # `build_payer_credential` (no `build_wallet_signer`): si
+    # `ap2_settlement=aibank`, `seller_signers["ap2"]` tiene que ser una
+    # `AIBankCredential`, no un `WalletSigner` -- si no, `pay_to` sería una
+    # dirección EVM que `AP2Protocol` en riel AIBank nunca podría liquidar.
+    seller_signers = {
+        name: build_payer_credential(
+            role="seller", settings=settings.model_copy(update={"protocol": Protocol(name)})
+        )
+        for name in _PROTOCOL_NAMES
+    }
     # El COMPRADOR sí es configurable en caliente desde el dashboard (RM-19,
     # ver `_get_buyer_signer` más abajo) -- el vendedor de ejemplo no: ya
     # levantó sus servidores reales con `pay_to=seller_signers[name].address`
@@ -412,17 +437,62 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         assert llm_holder.client is not None
         return llm_holder.client
 
-    def _get_buyer_signer(db: Session) -> WalletSigner:
-        """El backend de wallet del COMPRADOR (RM-06/RM-19): fila de
+    def _get_buyer_signer(db: Session, *, protocol: str) -> PayerCredential:
+        """El backend de wallet del COMPRADOR (RM-06/RM-19/RM-18): fila de
         `wallet_settings` si existe, si no `Settings.wallet_backend` de
         entorno como fallback -- mismo patrón que `_get_llm_client`. Solo
         se reconstruye cuando la configuración efectiva cambia; una wallet
         Circle ya resuelta reusa su dirección cacheada sin volver a pedirla
-        por red en cada request."""
+        por red en cada request.
+
+        `protocol` es el protocolo del request actual (`x402`/`ap2`): hace
+        falta para validar el backend `aibank` (RM-18), que solo tiene
+        sentido con AP2 y solo si el dashboard arrancó con
+        `ap2_settlement=aibank` (es una propiedad de la instancia de
+        `AP2Protocol` ya montada, fija desde `build_dashboard_app` -- ver
+        comentario ahí)."""
         settings_row = SqlWalletSettingsStore(db).get()
         backend = settings_row.backend if settings_row is not None else settings.wallet_backend.value
 
-        if backend == "circle":
+        if protocol == "ap2" and settings.ap2_settlement is SettlementRail.AIBANK and backend != "aibank":
+            # El dashboard arrancó con el riel de AP2 fijado en AIBank -- la
+            # instancia de `AP2Protocol` ya montada solo acepta una
+            # `AIBankCredential` (ver `build_buyer_client`); cualquier otro
+            # backend acá produciría un `AssertionError` crudo más abajo en
+            # vez de un error claro.
+            raise HTTPException(
+                500,
+                "Este dashboard se inició con AGENT_COMMERCE_AP2_SETTLEMENT=aibank: el backend de "
+                "wallet del comprador tiene que ser 'aibank' para poder pagar con AP2 -- cambialo "
+                "desde 'Configurar wallet'.",
+            )
+
+        if backend == "aibank":
+            if protocol != "ap2":
+                raise HTTPException(
+                    500,
+                    "El backend de wallet 'aibank' solo aplica al protocolo AP2 -- elegí AP2 "
+                    "arriba, o cambiá de backend desde 'Configurar wallet'.",
+                )
+            if settings.ap2_settlement is not SettlementRail.AIBANK:
+                raise HTTPException(
+                    500,
+                    "El backend de wallet 'aibank' requiere que el dashboard se haya iniciado con "
+                    "AGENT_COMMERCE_AP2_SETTLEMENT=aibank -- el riel de liquidación de AP2 queda "
+                    "fijo al arrancar el proceso, no se puede cambiar en caliente.",
+                )
+            key: _WalletSignerKey = (
+                "aibank",
+                (settings_row.aibank_account_id if settings_row else None) or "",
+                (settings_row.aibank_api_key if settings_row else None) or "",
+            )
+            if wallet_signer_holder.key != key:
+                wallet_signer_holder.signer = AIBankCredential(
+                    account_id=settings_row.aibank_account_id if settings_row else None,
+                    api_key=settings_row.aibank_api_key if settings_row else None,
+                )
+                wallet_signer_holder.key = key
+        elif backend == "circle":
             if settings_row is None or not (
                 settings_row.circle_api_key
                 and settings_row.circle_entity_secret
@@ -434,7 +504,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                     "wallet' en la página de Probar comprador (API key, entity secret y "
                     "wallet_id de Circle).",
                 )
-            key: _WalletSignerKey = (
+            key = (
                 "circle",
                 settings_row.circle_api_key,
                 settings_row.circle_entity_secret,
@@ -485,13 +555,15 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
 
     @api.get("/protocols")
     async def api_protocols(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-        # Si el backend de wallet Circle está mal configurado, no tiene
-        # sentido tumbar esta vista general por eso -- se degrada a
-        # `buyer_address: None` en vez de propagar el 500.
-        try:
-            buyer_address: str | None = _get_buyer_signer(db).address
-        except HTTPException:
-            buyer_address = None
+        def _buyer_address(name: str) -> str | None:
+            # Si el backend de wallet está mal configurado (o, con `aibank`,
+            # no aplica a este protocolo), no tiene sentido tumbar esta vista
+            # general por eso -- se degrada a `buyer_address: None` en vez de
+            # propagar el 500.
+            try:
+                return _get_buyer_signer(db, protocol=name).address
+            except HTTPException:
+                return None
 
         return [
             {
@@ -501,7 +573,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                 "network": settings.network,
                 "mode": settings.mode.value,
                 "seller_pay_to": seller_signers[name].address,
-                "buyer_address": buyer_address,
+                "buyer_address": _buyer_address(name),
                 "endpoint": _seller_url(name),
             }
             for name in _PROTOCOL_NAMES
@@ -593,7 +665,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             protocols=[payload.protocol],
         )
         catalog = InMemoryServiceRegistry([listing])
-        buyer_signer = _get_buyer_signer(db)
+        buyer_signer = _get_buyer_signer(db, protocol=payload.protocol)
 
         started = time.monotonic()
         try:
@@ -731,6 +803,8 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             "has_circle_api_key": False,
             "has_circle_entity_secret": False,
             "circle_wallet_id": None,
+            "aibank_account_id": None,
+            "has_aibank_api_key": False,
             "updated_at": None,
         }
 
@@ -738,7 +812,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
     async def api_update_wallet_settings(
         payload: UpdateWalletSettingsRequest, db: Session = Depends(get_db)
     ) -> dict[str, Any]:
-        if payload.backend not in ("local", "circle"):
+        if payload.backend not in ("local", "circle", "aibank"):
             raise HTTPException(400, f"Backend de wallet desconocido: {payload.backend}")
         store = SqlWalletSettingsStore(db)
         try:
@@ -747,6 +821,8 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                 circle_api_key=payload.circle_api_key,
                 circle_entity_secret=payload.circle_entity_secret,
                 circle_wallet_id=payload.circle_wallet_id,
+                aibank_account_id=payload.aibank_account_id,
+                aibank_api_key=payload.aibank_api_key,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -862,7 +938,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         store.add_message(conversation_id=conversation.id, role="user", content=payload.content)
         prompt = _build_prompt_with_history(prior_messages, payload.content)
 
-        buyer_signer = _get_buyer_signer(db)
+        buyer_signer = _get_buyer_signer(db, protocol=agent.protocol)
         async with PayingAgent(
             protocol=protocols[agent.protocol], signer=buyer_signer, catalog=_agent_catalog(agent.protocol)
         ) as paying_agent:

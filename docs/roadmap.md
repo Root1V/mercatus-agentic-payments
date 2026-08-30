@@ -458,9 +458,36 @@ demo --protocol ap2 --ap2-settlement aibank --mode mock` corrido de punta a punt
 con `protocolo=ap2`, `red=aibank:mock`. `agent-commerce demo --protocol x402` y `--protocol ap2` (riel
 x402 default) confirmados sin regresión. Suite completa 136/136, `ruff`/`mypy` limpios en todo `src`.
 
-**Pendiente, explícitamente fuera de esta pasada**: exponer `ap2_settlement=aibank` como opción en el
-dashboard (mismo patrón que RM-19 hizo para el backend de wallet) -- hoy solo funciona vía
-CLI/framework, igual que x402/AP2 antes de RM-07/08.
+### AIBank en el dashboard (RM-19, extendido)
+
+`aibank` se agregó como tercer valor de `backend` en `wallet_settings` (junto a `local`/`circle`),
+con dos columnas nuevas nullable (`aibank_account_id`, `aibank_api_key`) y migración `0005`. A
+diferencia de Circle, ninguno de los dos es obligatorio la primera vez: si se dejan vacíos,
+`AIBankCredential` genera una cuenta efímera al vuelo (mismo criterio que la wallet local).
+
+Restricción real, distinta de RM-19: el riel de AP2 (`ap2_settlement`) es una propiedad de la
+instancia de `AP2Protocol` que ya montó el servidor del vendedor al arrancar el proceso -- **no se
+puede cambiar en caliente** sin reiniciar el dashboard con `AGENT_COMMERCE_AP2_SETTLEMENT=aibank`
+(a diferencia de la credencial del comprador en sí, que sí es dinámica, como toda wallet desde
+RM-19). `_get_buyer_signer` valida esto explícitamente en dos direcciones: pedir `aibank` con
+`protocol=x402`, o pedir `aibank` cuando el dashboard NO arrancó con ese riel, degradan con un 500
+y un mensaje claro (no un `AssertionError` crudo) -- y al revés, dejar el backend en `local`/`circle`
+mientras el dashboard SÍ arrancó en riel AIBank también se detecta y explica antes de llegar a
+`AP2Protocol.build_buyer_client`. `seller_signers["ap2"]` también se resuelve con
+`build_payer_credential` (no `build_wallet_signer`) para que, en ese modo, sea una
+`AIBankCredential` -- si no, `pay_to` sería una dirección EVM que ese riel nunca podría liquidar.
+
+Frontend (`BuyerTestPage.tsx`): tercera pestaña "AIBank" en "Configurar wallet", con los dos campos
+opcionales y un aviso inline explicando la restricción de arranque. El badge del recibo
+("Firmado con...") ahora distingue los tres backends.
+
+Verificado en el navegador con el dashboard real reiniciado con `AP2_SETTLEMENT=aibank`: pago AP2
+liquidado con el badge "Firmado con AIBank", red `aibank:mock`, cuentas generadas automáticamente;
+x402 confirmado sin regresión en la misma sesión; el caso de backend mal emparejado con el protocolo
+mostró el 500 con el mensaje esperado (`El backend de wallet 'aibank' solo aplica al protocolo AP2...`).
+10 tests nuevos (3 del adaptador SQL, 7 de la API -- incluye un pago AP2/AIBank real de punta a
+punta vía el dashboard y el caso "riel aibank, backend sin actualizar"). Suite completa 146/146,
+`ruff`/`mypy` limpios.
 
 <a id="rm-19"></a>
 

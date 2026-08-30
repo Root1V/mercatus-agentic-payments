@@ -143,10 +143,15 @@ class WalletSettingsModel(Base):
     __tablename__ = "wallet_settings"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    backend: Mapped[str] = mapped_column(String(16))  # "local" | "circle"
+    backend: Mapped[str] = mapped_column(String(16))  # "local" | "circle" | "aibank"
     circle_api_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     circle_entity_secret: Mapped[str | None] = mapped_column(String(500), nullable=True)
     circle_wallet_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # AIBank (RM-18): ambos opcionales -- a diferencia de Circle, si se dejan
+    # vacíos `AIBankCredential` genera una cuenta efímera al vuelo, así que
+    # no hace falta exigirlos la primera vez que se elige este backend.
+    aibank_account_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    aibank_api_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

@@ -24,6 +24,12 @@ import {
 import { CopyButton } from "@/components/ui/copy-button";
 import { ProtocolBadge } from "@/components/dashboard/ProtocolBadge";
 
+const WALLET_BACKEND_LABELS: Record<"local" | "circle" | "aibank", string> = {
+  local: "wallet local",
+  circle: "Circle",
+  aibank: "AIBank",
+};
+
 const DEFAULT_TEXT =
   "El protocolo x402 revive el codigo de estado HTTP 402 para que agentes de IA paguen APIs " +
   "automaticamente. AP2 de Google agrega una capa de mandatos de autorizacion agnostica al riel " +
@@ -153,7 +159,7 @@ export function BuyerTestPage() {
                       Recibo de pago <ProtocolBadge protocol={testCall.data.receipt.protocol} />
                       {testCall.data.receipt.wallet_backend && (
                         <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-medium normal-case text-secondary-foreground">
-                          Firmado con {testCall.data.receipt.wallet_backend === "circle" ? "Circle" : "wallet local"}
+                          Firmado con {WALLET_BACKEND_LABELS[testCall.data.receipt.wallet_backend]}
                         </span>
                       )}
                     </p>
@@ -239,6 +245,8 @@ function WalletSettingsForm({
     circle_api_key: "",
     circle_entity_secret: "",
     circle_wallet_id: settings?.circle_wallet_id ?? "",
+    aibank_account_id: settings?.aibank_account_id ?? "",
+    aibank_api_key: "",
   });
 
   function handleSubmit(event: FormEvent) {
@@ -248,6 +256,8 @@ function WalletSettingsForm({
       circle_api_key: form.circle_api_key ? form.circle_api_key : undefined,
       circle_entity_secret: form.circle_entity_secret ? form.circle_entity_secret : undefined,
       circle_wallet_id: form.backend === "circle" ? form.circle_wallet_id : null,
+      aibank_account_id: form.backend === "aibank" ? form.aibank_account_id || null : null,
+      aibank_api_key: form.aibank_api_key ? form.aibank_api_key : undefined,
     });
   }
 
@@ -259,6 +269,7 @@ function WalletSettingsForm({
           <TabsList>
             <TabsTrigger value="local">Local (efímera)</TabsTrigger>
             <TabsTrigger value="circle">Circle</TabsTrigger>
+            <TabsTrigger value="aibank">AIBank</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -297,6 +308,39 @@ function WalletSettingsForm({
               required
               value={form.circle_wallet_id}
               onChange={(e) => setForm({ ...form, circle_wallet_id: e.target.value })}
+            />
+          </div>
+        </>
+      )}
+
+      {form.backend === "aibank" && (
+        <>
+          <p className="rounded-lg bg-secondary/60 p-3 text-xs text-muted-foreground">
+            Solo tiene efecto con el protocolo <span className="font-medium text-foreground">AP2</span>, y
+            solo si el dashboard se inició con{" "}
+            <code className="rounded bg-secondary px-1 py-0.5">AGENT_COMMERCE_AP2_SETTLEMENT=aibank</code> --
+            el riel de liquidación de AP2 queda fijo al arrancar el proceso, no se puede cambiar en
+            caliente.
+          </p>
+          <div className="flex flex-col gap-1.5">
+            <Label>Cuenta de AIBank (opcional)</Label>
+            <Input
+              placeholder="se genera automático si lo dejás vacío"
+              value={form.aibank_account_id}
+              onChange={(e) => setForm({ ...form, aibank_account_id: e.target.value })}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>
+              {settings?.has_aibank_api_key
+                ? "API key de AIBank (dejar vacío para no cambiarla)"
+                : "API key de AIBank (opcional)"}
+            </Label>
+            <Input
+              type="password"
+              placeholder={settings?.has_aibank_api_key ? "••••••••" : "se genera automático si lo dejás vacío"}
+              value={form.aibank_api_key}
+              onChange={(e) => setForm({ ...form, aibank_api_key: e.target.value })}
             />
           </div>
         </>

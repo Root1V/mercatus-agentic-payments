@@ -17,6 +17,8 @@ def _to_settings(model: WalletSettingsModel) -> WalletSettings:
         circle_api_key=model.circle_api_key,
         circle_entity_secret=model.circle_entity_secret,
         circle_wallet_id=model.circle_wallet_id,
+        aibank_account_id=model.aibank_account_id,
+        aibank_api_key=model.aibank_api_key,
         updated_at=model.updated_at,
     )
 
@@ -36,6 +38,8 @@ class SqlWalletSettingsStore:
         circle_api_key: str | None,
         circle_entity_secret: str | None,
         circle_wallet_id: str | None,
+        aibank_account_id: str | None,
+        aibank_api_key: str | None,
     ) -> WalletSettings:
         model = self._db.get(WalletSettingsModel, _SINGLETON_ID)
         if backend == "circle":
@@ -56,6 +60,9 @@ class SqlWalletSettingsStore:
         if circle_entity_secret is not None:
             model.circle_entity_secret = circle_entity_secret
         model.circle_wallet_id = circle_wallet_id
+        model.aibank_account_id = aibank_account_id
+        if aibank_api_key is not None:
+            model.aibank_api_key = aibank_api_key
 
         self._db.commit()
         self._db.refresh(model)
