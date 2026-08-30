@@ -22,6 +22,7 @@ class Mode(str, Enum):
 class Protocol(str, Enum):
     X402 = "x402"
     AP2 = "ap2"
+    AIBANK = "aibank"
 
 
 class WalletBackend(str, Enum):
@@ -52,6 +53,16 @@ class Settings(BaseSettings):
     circle_entity_secret: SecretStr | None = None
     circle_buyer_wallet_id: str | None = None
     circle_seller_wallet_id: str | None = None
+
+    # --- AIBank (riel de banco propio, RM-18) ---------------------------------
+    # Solo aplica con protocol=aibank. Sin valores, en modo mock se generan
+    # cuenta/api key efímeras al vuelo (mismo criterio que LocalEoaSigner sin
+    # private_key) -- fijalos solo si necesitás reusar la misma cuenta entre
+    # corridas (p. ej. contra un AIBank real el día que exista uno).
+    aibank_buyer_account_id: str | None = None
+    aibank_buyer_api_key: SecretStr | None = None
+    aibank_seller_account_id: str | None = None
+    aibank_seller_api_key: SecretStr | None = None
 
     # --- Dashboard: persistencia + auth (extra opcional "dashboard") ---------
     # Nada de esto se usa fuera de `agent_commerce.dashboard`/`agent_commerce.auth`;
