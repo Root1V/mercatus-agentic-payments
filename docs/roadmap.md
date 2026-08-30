@@ -329,34 +329,64 @@ auth-service/gateway como servidor real, mismo patrón que RM-14).
 
 <a id="rm-18"></a>
 
-## RM-18 — Otros rieles de pago (tarjetas, Apple Pay, banco propio)
+## RM-18 — Otros rieles de pago (tarjeta emitida por la plataforma, banco propio)
 **Estado:** ⬜ Backlog
 
 Hoy el framework solo liquida sobre rieles cripto (x402 directo, AP2 delegando en x402) vía el
 puerto `WalletSigner` (`payments/wallets/`), diseñado específicamente alrededor de firma
-EIP-712/EIP-191 (EVM). Agregar tarjetas (Visa/Mastercard), Apple Pay, o un banco propio (p. ej.
-"AIBank") **no encaja como un `WalletSigner` más** -- son rieles con un modelo de
-autorización/liquidación totalmente distinto (auth+capture, no una firma que habilita una
-transferencia on-chain). Van a necesitar, como mínimo, un nuevo `PaymentProtocol` (o un puerto
-nuevo por encima de `WalletSigner`/`PaymentProtocol`) que negocie/autorice/liquide con la forma de
-cada riel -- decisión de diseño para cuando se encare esta fase, no asumida de antemano.
+EIP-712/EIP-191 (EVM). Agregar un riel nuevo **no encaja como un `WalletSigner` más** -- son rieles
+con un modelo de autorización/liquidación totalmente distinto (auth+capture, no una firma que
+habilita una transferencia on-chain). Van a necesitar, como mínimo, un nuevo `PaymentProtocol` con
+su propio tipo de credencial (no forzar `WalletSigner` en un molde que no le corresponde) -- decisión
+de diseño para cuando se encare esta fase, no asumida de antemano.
 
-Por riel:
+### El criterio que decide qué riel entra en el backlog
 
-- **Visa / Mastercard**: en la práctica casi ninguna empresa integra directo contra la red -- se
-  hace vía un procesador/adquirente (Stripe, Adyen, etc.) o las APIs propias de cada red (Visa
-  Direct, Mastercard Send, ambas orientadas a *payouts*, no exactamente al caso de "agente le paga
-  a un servicio"). Antes de codear, investigar cuál de esos caminos es real para el caso de uso
-  antes de elegir uno.
-- **Apple Pay**: es una capa de wallet/tokenización (PassKit, Apple Pay on the Web), no un riel de
-  liquidación en sí mismo -- igual necesita un procesador de pagos por detrás, más registro de
-  merchant y verificación de dominio ante Apple.
-- **Banco propio (AIBank u otro)**: acá el trabajo es nuestro -- diseñar y documentar el contrato
-  que ese banco tendría que exponer para integrarse (siguiendo el mismo espíritu que x402/AP2 son
-  contratos abiertos que cualquiera puede implementar). Como mínimo definir: modelo de auth
-  (¿OAuth2 client_credentials como Prometheus? ¿mTLS? ¿API key?), endpoints de autorización/captura/
-  consulta/reembolso de un pago, idempotencia, y cómo se notifica la liquidación final (webhook vs.
-  polling) -- básicamente un mini-spec de protocolo de pago, no solo un adaptador de wallet.
+La premisa fundacional del proyecto (ver `docs/business_model_analysis.md`) no es "cripto sí, fiat
+no" -- es que **el agente tiene su propio medio de pago, revocable y con límite propio, que no le
+pertenece a un humano**. Una wallet Circle (RM-06) cumple esto porque es *developer-controlled*: la
+plataforma la emite y se la asigna al agente, ningún humano presta su clave. Ese es el filtro real
+para cualquier riel nuevo: **¿el proveedor ofrece emisión programática de credenciales a nivel
+plataforma/negocio, o solo atiende cuentas de un consumidor individual?**
+
+Con ese filtro se evaluaron tres candidatos y se descartó uno:
+
+- **Tarjetas vía un emisor programático (Stripe Issuing, Marqeta, Adyen for Platforms, o
+  similar)** -- SÍ entra. No es "el agente usa la tarjeta de un humano": son plataformas de *card
+  issuing* que emiten tarjetas virtuales por API, una por agente, con límite y merchant category
+  propios, emitidas por nosotros -- mismo modelo de custodia que Circle, solo que el instrumento es
+  una tarjeta en vez de una wallet EVM. Las redes de tarjetas (Visa, Mastercard) también vienen
+  anunciando programas propios orientados a agentes de IA en 2025 -- verificar su estado real antes
+  de comprometerse a uno; en cualquier caso el punto de integración es el emisor/procesador, no la
+  red directamente (casi nadie integra contra Visa/Mastercard sin intermediario).
+- **Banco propio (AIBank u otro)** -- SÍ entra, y es el más simple de arrancar porque el contrato lo
+  diseñamos nosotros: se puede especificar de entrada que las cuentas son sub-cuentas de agente bajo
+  una cuenta de plataforma/negocio (mismo modelo que Circle), sin identidad humana individual en el
+  medio. Como mínimo definir: modelo de auth (¿OAuth2 client_credentials como Prometheus? ¿mTLS?
+  ¿API key?), endpoints de autorización/captura/consulta/reembolso de un pago, idempotencia, y cómo
+  se notifica la liquidación final (webhook vs. polling) -- un mini-spec de protocolo de pago, no
+  solo un adaptador de wallet.
+- **Apple Pay -- descartado, no solo pospuesto.** Apple Pay está atado estructuralmente a la
+  identidad de un humano: Apple ID, dispositivo, Face ID/Touch ID como el propio mecanismo de
+  autorización. No existe un "Apple Pay para un agente autónomo" -- usarlo significaría que el
+  agente le pide prestado el medio de pago a un humano, exactamente lo que el proyecto busca evitar.
+  No encaja en "rieles de pago autónomos". Si algún día tiene sentido, sería una feature distinta
+  ("agente asistente de compras con humano en el loop", con el humano autorizando cada pago) y no un
+  backend más de `WalletSigner` -- no está en este backlog.
+
+### Mercados sin adopción cripto (p. ej. Perú)
+
+Mismo criterio aplica ahí: no es "cripto vs. fiat", es si el proveedor local (billeteras tipo
+Yape/Plin en Perú, u otras) expone una API de negocio para emitir sub-cuentas programáticas a
+agentes, o si -- como se ofrecen hoy a un consumidor final -- están atadas a un DNI humano (mismo
+problema que Apple Pay). Hay que investigarlo caso por caso, no asumirlo.
+
+La solución para que esto no genere desorden en la plataforma: la elección de riel **no es una
+decisión de arquitectura, es una decisión de configuración por agente/región** -- el mismo patrón ya
+construido en RM-17/RM-19 ("elegí backend, el formulario se adapta a los campos que ese backend
+necesita"). Un agente operando donde cripto es viable usa Circle; uno operando donde no lo es, usa
+la tarjeta emitida por la plataforma o AIBank. El núcleo (`PaymentProtocol`/`PayingAgent`) no cambia
+por país, solo qué credencial se resuelve para ese agente.
 
 Sin credenciales de ninguno de estos proveedores todavía -- como con Circle (RM-06) y Prometheus
 (RM-11), cualquier verificación real de este trabajo va a necesitar que el usuario provea sus
