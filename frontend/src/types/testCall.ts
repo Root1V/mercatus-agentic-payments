@@ -14,7 +14,7 @@ export interface PaymentReceiptDTO {
   pay_to: string;
   amount_usd: string;
   settlement_id: string;
-  wallet_backend: "local" | "circle" | null;
+  wallet_backend: "local" | "circle" | "aibank" | null;
 }
 
 export interface TestCallResult {

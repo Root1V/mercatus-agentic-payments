@@ -1,6 +1,8 @@
-"""Integración de `wallet_settings` (RM-19): elegir el backend de wallet del
-comprador (`local`/`circle`) desde el dashboard en caliente, sin reiniciar el
-proceso. El caso `circle` se prueba mockeando solo las llamadas de red del
+"""Integración de `wallet_settings` (RM-19/RM-18): elegir el backend de
+wallet del comprador (`local`/`circle`/`aibank`) desde el dashboard en
+caliente, sin reiniciar el proceso -- salvo `aibank`, cuyo riel de AP2 queda
+fijo desde que arranca el proceso (ver `dashboard_client_aibank_rail` más
+abajo). El caso `circle` se prueba mockeando solo las llamadas de red del
 SDK real de Circle (mismo patrón que `tests/payments/wallets/test_circle_wallet.py`),
 nunca contra una cuenta real."""
 
@@ -19,7 +21,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from agent_commerce.auth.bootstrap import create_admin
-from agent_commerce.config import Mode, Settings, get_settings
+from agent_commerce.config import Mode, Settings, SettlementRail, get_settings
 from agent_commerce.dashboard.app import build_dashboard_app
 from agent_commerce.db import models  # noqa: F401 -- registra las tablas en Base.metadata
 from agent_commerce.db.base import Base
@@ -44,8 +46,7 @@ def _jwt_test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-@pytest.fixture
-def dashboard_client() -> Iterator[TestClient]:
+def _build_dashboard_client(settings: Settings) -> Iterator[TestClient]:
     engine = create_engine(
         "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
@@ -63,7 +64,6 @@ def dashboard_client() -> Iterator[TestClient]:
     create_admin(admin_session, username="carlos", password="supersecret123")
     admin_session.close()
 
-    settings = Settings(mode=Mode.MOCK)
     app = build_dashboard_app(settings)
     app.dependency_overrides[get_db] = override_get_db
 
@@ -71,6 +71,21 @@ def dashboard_client() -> Iterator[TestClient]:
         yield client
 
     engine.dispose()
+
+
+@pytest.fixture
+def dashboard_client() -> Iterator[TestClient]:
+    yield from _build_dashboard_client(Settings(mode=Mode.MOCK))
+
+
+@pytest.fixture
+def dashboard_client_aibank_rail() -> Iterator[TestClient]:
+    """Dashboard arrancado con `ap2_settlement=aibank` -- el riel de AP2
+    queda fijo desde que se construye la app (ver comentario en
+    `build_dashboard_app`), así que probar el backend de wallet `aibank`
+    necesita su propia instancia, distinta de `dashboard_client` (que arranca
+    con el riel x402 por defecto)."""
+    yield from _build_dashboard_client(Settings(mode=Mode.MOCK, ap2_settlement=SettlementRail.AIBANK))
 
 
 def _auth_headers(client: TestClient) -> dict[str, str]:
@@ -268,3 +283,124 @@ def test_test_call_receipt_reports_local_backend_by_default(dashboard_client: Te
     )
     assert response.status_code == 200
     assert response.json()["receipt"]["wallet_backend"] == "local"
+
+
+def test_put_wallet_settings_aibank_needs_no_fields(dashboard_client: TestClient) -> None:
+    """A diferencia de Circle, AIBank no exige nada la primera vez -- se
+    genera una cuenta efímera al vuelo si se deja vacío."""
+    headers = _auth_headers(dashboard_client)
+    response = dashboard_client.put(
+        "/api/admin/wallet-settings", json={"backend": "aibank"}, headers=headers
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["backend"] == "aibank"
+    assert body["aibank_account_id"] is None
+    assert body["has_aibank_api_key"] is False
+
+
+def test_put_wallet_settings_aibank_never_returns_api_key(dashboard_client: TestClient) -> None:
+    headers = _auth_headers(dashboard_client)
+    response = dashboard_client.put(
+        "/api/admin/wallet-settings",
+        json={"backend": "aibank", "aibank_account_id": "cuenta-1", "aibank_api_key": "sk-secreta"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "aibank_api_key" not in body
+    assert body["aibank_account_id"] == "cuenta-1"
+    assert body["has_aibank_api_key"] is True
+
+
+def test_test_call_with_aibank_backend_fails_clearly_on_x402(dashboard_client: TestClient) -> None:
+    """`aibank` solo tiene sentido con AP2 -- pedirlo sobre x402 tiene que
+    fallar con un mensaje claro, no un error interno."""
+    headers = _auth_headers(dashboard_client)
+    dashboard_client.put("/api/admin/wallet-settings", json={"backend": "aibank"}, headers=headers)
+
+    response = dashboard_client.post(
+        "/api/test-call",
+        json={"protocol": "x402", "text": "hola mundo", "max_sentences": 1},
+        headers=headers,
+    )
+    assert response.status_code == 500
+    assert "ap2" in response.json()["detail"].lower()
+
+
+def test_test_call_with_aibank_backend_fails_clearly_when_dashboard_not_started_for_it(
+    dashboard_client: TestClient,
+) -> None:
+    """`dashboard_client` (fixture por defecto) arranca con `ap2_settlement=x402`
+    -- elegir el backend `aibank` de todos modos tiene que degradar con un
+    mensaje claro (reiniciar con la env var), no una excepción cruda."""
+    headers = _auth_headers(dashboard_client)
+    dashboard_client.put("/api/admin/wallet-settings", json={"backend": "aibank"}, headers=headers)
+
+    response = dashboard_client.post(
+        "/api/test-call",
+        json={"protocol": "ap2", "text": "hola mundo", "max_sentences": 1},
+        headers=headers,
+    )
+    assert response.status_code == 500
+    assert "ap2_settlement" in response.json()["detail"].lower()
+
+
+def test_protocols_endpoint_shows_aibank_buyer_address_only_for_ap2(
+    dashboard_client_aibank_rail: TestClient,
+) -> None:
+    headers = _auth_headers(dashboard_client_aibank_rail)
+    dashboard_client_aibank_rail.put(
+        "/api/admin/wallet-settings", json={"backend": "aibank"}, headers=headers
+    )
+
+    response = dashboard_client_aibank_rail.get("/api/protocols", headers=headers)
+    assert response.status_code == 200
+    by_name = {p["name"]: p for p in response.json()}
+    assert by_name["x402"]["buyer_address"] is None
+    assert by_name["ap2"]["buyer_address"] is not None
+
+
+def test_test_call_with_ap2_fails_clearly_when_rail_is_aibank_but_backend_is_not(
+    dashboard_client_aibank_rail: TestClient,
+) -> None:
+    """`dashboard_client_aibank_rail` arrancó con `ap2_settlement=aibank`,
+    pero el backend de wallet del comprador sigue en 'local' (default) --
+    la instancia de `AP2Protocol` ya montada solo acepta `AIBankCredential`,
+    así que esto tiene que degradar con un mensaje claro, no un
+    `AssertionError` crudo."""
+    headers = _auth_headers(dashboard_client_aibank_rail)
+    response = dashboard_client_aibank_rail.post(
+        "/api/test-call",
+        json={"protocol": "ap2", "text": "hola mundo", "max_sentences": 1},
+        headers=headers,
+    )
+    assert response.status_code == 500
+    assert "aibank" in response.json()["detail"].lower()
+
+
+def test_test_call_pays_with_aibank_backed_buyer(dashboard_client_aibank_rail: TestClient) -> None:
+    """El caso central de RM-18 en el dashboard: configurar `aibank` desde
+    la UI (sin tocar el entorno del proceso) y que un pago real de AP2 en
+    modo mock efectivamente liquide sobre AIBank -- se verifica que el
+    `payer`/`red` del recibo reflejen ese riel."""
+    headers = _auth_headers(dashboard_client_aibank_rail)
+    dashboard_client_aibank_rail.put(
+        "/api/admin/wallet-settings",
+        json={"backend": "aibank", "aibank_account_id": "comprador-1"},
+        headers=headers,
+    )
+
+    response = dashboard_client_aibank_rail.post(
+        "/api/test-call",
+        json={"protocol": "ap2", "text": "Frase uno. Frase dos. Frase tres.", "max_sentences": 1},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["receipt"]["payer"] == "comprador-1"
+    assert body["receipt"]["network"] == "aibank:mock"
+    assert body["receipt"]["wallet_backend"] == "aibank"
+
+    ledger = dashboard_client_aibank_rail.get("/api/ledger", headers=headers).json()
+    assert ledger[0]["payer"] == "comprador-1"

@@ -14,7 +14,12 @@ def test_get_returns_none_when_unconfigured(db_session: Session) -> None:
 def test_upsert_local_backend_needs_no_circle_fields(db_session: Session) -> None:
     store = SqlWalletSettingsStore(db_session)
     created = store.upsert(
-        backend="local", circle_api_key=None, circle_entity_secret=None, circle_wallet_id=None
+        backend="local",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id=None,
+        aibank_api_key=None,
     )
     assert created.backend == "local"
 
@@ -30,6 +35,8 @@ def test_upsert_circle_creates_then_get_returns_it(db_session: Session) -> None:
         circle_api_key="TEST_API_KEY:abc",
         circle_entity_secret="a" * 64,
         circle_wallet_id="wallet-1",
+        aibank_account_id=None,
+        aibank_api_key=None,
     )
     assert created.circle_entity_secret == "a" * 64
 
@@ -47,10 +54,17 @@ def test_upsert_circle_without_secret_keeps_existing_secret(db_session: Session)
         circle_api_key="key-1",
         circle_entity_secret="a" * 64,
         circle_wallet_id="wallet-1",
+        aibank_account_id=None,
+        aibank_api_key=None,
     )
 
     updated = store.upsert(
-        backend="circle", circle_api_key="key-2", circle_entity_secret=None, circle_wallet_id="wallet-2"
+        backend="circle",
+        circle_api_key="key-2",
+        circle_entity_secret=None,
+        circle_wallet_id="wallet-2",
+        aibank_account_id=None,
+        aibank_api_key=None,
     )
 
     assert updated.circle_api_key == "key-2"
@@ -62,7 +76,12 @@ def test_upsert_circle_without_secret_on_empty_store_raises(db_session: Session)
     store = SqlWalletSettingsStore(db_session)
     with pytest.raises(ValueError, match="circle_entity_secret"):
         store.upsert(
-            backend="circle", circle_api_key="key-1", circle_entity_secret=None, circle_wallet_id="wallet-1"
+            backend="circle",
+            circle_api_key="key-1",
+            circle_entity_secret=None,
+            circle_wallet_id="wallet-1",
+            aibank_account_id=None,
+            aibank_api_key=None,
         )
 
 
@@ -74,7 +93,76 @@ def test_switching_back_to_local_does_not_require_circle_secret(db_session: Sess
         circle_api_key="key-1",
         circle_entity_secret="a" * 64,
         circle_wallet_id="wallet-1",
+        aibank_account_id=None,
+        aibank_api_key=None,
     )
 
-    updated = store.upsert(backend="local", circle_api_key=None, circle_entity_secret=None, circle_wallet_id=None)
+    updated = store.upsert(
+        backend="local",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id=None,
+        aibank_api_key=None,
+    )
     assert updated.backend == "local"
+
+
+def test_upsert_aibank_backend_needs_no_fields(db_session: Session) -> None:
+    """A diferencia de Circle, AIBank no exige nada la primera vez -- se
+    generan efímeros al vuelo si se dejan vacíos (ver `AIBankCredential`)."""
+    store = SqlWalletSettingsStore(db_session)
+    created = store.upsert(
+        backend="aibank",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id=None,
+        aibank_api_key=None,
+    )
+    assert created.backend == "aibank"
+    assert created.aibank_account_id is None
+    assert created.aibank_api_key is None
+
+
+def test_upsert_aibank_with_fields_then_get_returns_them(db_session: Session) -> None:
+    store = SqlWalletSettingsStore(db_session)
+    created = store.upsert(
+        backend="aibank",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id="aibank_account_1",
+        aibank_api_key="sk_aibank_1",
+    )
+    assert created.aibank_account_id == "aibank_account_1"
+    assert created.aibank_api_key == "sk_aibank_1"
+
+    fetched = store.get()
+    assert fetched is not None
+    assert fetched.aibank_account_id == "aibank_account_1"
+    assert fetched.aibank_api_key == "sk_aibank_1"
+
+
+def test_upsert_aibank_without_api_key_keeps_existing_one(db_session: Session) -> None:
+    store = SqlWalletSettingsStore(db_session)
+    store.upsert(
+        backend="aibank",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id="account-1",
+        aibank_api_key="key-1",
+    )
+
+    updated = store.upsert(
+        backend="aibank",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id="account-2",
+        aibank_api_key=None,
+    )
+
+    assert updated.aibank_account_id == "account-2"
+    assert updated.aibank_api_key == "key-1"

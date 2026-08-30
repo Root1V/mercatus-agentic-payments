@@ -21,6 +21,8 @@ class InMemoryWalletSettingsStore:
         circle_api_key: str | None,
         circle_entity_secret: str | None,
         circle_wallet_id: str | None,
+        aibank_account_id: str | None,
+        aibank_api_key: str | None,
     ) -> WalletSettings:
         if backend == "circle":
             has_prior_api_key = self._settings is not None and self._settings.circle_api_key is not None
@@ -34,12 +36,16 @@ class InMemoryWalletSettingsStore:
             circle_api_key = self._settings.circle_api_key
         if circle_entity_secret is None and self._settings is not None:
             circle_entity_secret = self._settings.circle_entity_secret
+        if aibank_api_key is None and self._settings is not None:
+            aibank_api_key = self._settings.aibank_api_key
 
         self._settings = WalletSettings(
             backend=backend,
             circle_api_key=circle_api_key,
             circle_entity_secret=circle_entity_secret,
             circle_wallet_id=circle_wallet_id,
+            aibank_account_id=aibank_account_id,
+            aibank_api_key=aibank_api_key,
             updated_at=datetime.now(UTC),
         )
         return self._settings
