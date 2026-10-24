@@ -517,6 +517,142 @@ nuevos (3 del adaptador SQL, 6 de la API) reemplazan a los que probaban el dise�
 incluye `test_switching_between_x402_and_aibank_live_without_restart`, que corre ese mismo
 ida-y-vuelta contra un único `dashboard_client`. Suite completa 145/145, `ruff`/`mypy` limpios.
 
+### AIBank es un banco real -- contrato de integración y respuesta del equipo de AIBank
+
+Aclaración importante que llegó después de lo anterior: **AIBank no es (solo) un simulador de este
+proyecto -- es un banco real que el usuario está construyendo con otro equipo**, y `MockAIBank` es el
+sustituto local mientras ese banco no existe todavía (mismo rol que cumple `MockFacilitator` para
+x402). Por eso se redactó `docs/aibank_integration_contract.md` (fuera de este repo hasta que se pida
+versionarlo aquí): un contrato técnico completo -- auth OAuth2 `client_credentials`, endpoints de
+autorización/captura/consulta/reembolso, derivación de `Idempotency-Key` desde `cart_id`, montos en
+enteros de millonésimas (10⁻⁶, no centavos -- necesario porque el catálogo de este framework ya tiene
+precios de $0.001/llamada que en centavos redondearían a cero), notificación de liquidación síncrona,
+y requisitos del entorno de sandbox -- para que el equipo externo de AIBank supiera exactamente qué
+construir.
+
+El equipo de AIBank respondió con 24 puntos (`10-preguntas-mercatus.md`, fuera del repo). Resumen:
+
+- **Confirmado sin cambios**: OAuth2 `client_credentials`, cuentas mono-moneda, `account_id` opaco con
+  prefijo `acc_`, montos en millonésimas (con la migración de su ledger completo a esa escala **ya
+  hecha** de su lado), liquidación síncrona sin webhook, `Idempotency-Key` derivada del `cart_id`,
+  patrón autorizar-y-luego-capturar.
+- **Bloqueante real (P0), no técnico sino legal**: en ninguna jurisdicción de la región puede abrirse
+  una cuenta bancaria a nombre de un agente de software -- la estructura viable es una **cuenta
+  ómnibus** (Mercatus como titular legal tras su propio KYB, cada `acc_...` un sub-ledger virtual, no
+  una cuenta bancaria independiente). Esto traslada obligaciones de compliance a Mercatus (identificar
+  al dueño humano/jurídico detrás de cada agente, fondeo/retiro de la cuenta maestra, límites, poder
+  congelar una sub-cuenta) que son decisiones de negocio del usuario, no de este framework -- quedan
+  abiertas, sin fecha, hasta que se resuelvan con asesoría legal real.
+- **Defaults técnicos que AIBank propuso ante la falta de respuesta**, todos razonables y ya adoptados
+  en el simulador (ver más abajo): autorización vigente 15 minutos con liberación automática al
+  vencer; `capture` idempotente por naturaleza (una segunda captura sobre una autorización YA
+  capturada devuelve esa misma autorización, no un error -- el error queda reservado para capturar
+  algo anulado/vencido); rechazo si pagador y receptor son la misma cuenta; retención indefinida de
+  `Idempotency-Key` (más estricta que las 24h que había propuesto Mercatus).
+- **Cronograma revisado**: la fecha original del contrato v0.3 (sandbox el 2026-09-02) no es
+  alcanzable -- el alcance real (migración de escala del ledger, servidor OAuth2 completo, primitiva
+  de autorización en su core, endpoints, sandbox, rate limiting) son 4-6 semanas. Contrapropuesta:
+  **E0** (3 días hábiles) congela el OpenAPI y expone un sandbox de respuestas fijas -- equivalente,
+  del lado de AIBank, a lo que `MockAIBank` es del lado de Mercatus -- para que el cliente HTTP se
+  pueda escribir y probar contra formas reales sin esperar al banco de verdad; **E1** (3 semanas) es
+  el camino de pago real; **E2** (4 semanas) agrega creación de cuentas y extracto; **E3** (sin fecha)
+  reembolso parcial y PEN/EUR.
+
+**Ya reflejado en `MockAIBank` (esta sesión, sin esperar a E0)**: los tres defaults técnicos de
+AIBank que sí son simulables en un backend en memoria -- vigencia de 15 minutos
+(`AUTHORIZATION_TTL_SECONDS`) con `authorization_expired` al capturar una vencida, `capture`
+idempotente (segunda captura devuelve la misma autorización en vez de fallar), y rechazo
+`same_account`. 3 tests nuevos en `tests/payments/test_mock_aibank.py`; el resto de los defaults
+(idempotencia de `POST /v1/accounts`, código HTTP del replay, endpoint de extracto) son detalles del
+transporte HTTP del banco real que no aplican a un mock in-process y se implementarán en el cliente
+HTTP real cuando exista un E0 contra el cual escribirlo. **Pendiente, sin empezar**: redactar la
+respuesta formal de Mercatus a los puntos P0 (estructura legal/KYB, a quién pertenecen los agentes,
+fondeo) -- requiere una decisión de negocio del usuario, no de este framework.
+
+### Modelo B -- pago sobre la cuenta propia del cliente final
+
+Tras responder los P0 (agentes de clientes de Mercatus, cronograma E0-E3 aceptado, propuesta de
+entidad legal), surgió una pregunta de arquitectura que no estaba en el backlog: ¿por qué el dinero
+tiene que pasar SIEMPRE por una cuenta ómnibus de Mercatus? Si un cliente de Mercatus ya es cliente
+bancario de AIBank, ¿podría su agente pagar directo contra SU cuenta, con Mercatus como mera capa de
+software? Análisis de pros/contras entregado al usuario -- en corto: el modelo ómnibus (**A**) sigue
+siendo el producto principal (onboarding sin fricción, coherente con la propuesta de valor de
+"wallet emitida por la plataforma", mejor techo de monetización); pero una variante de cuenta propia
+(**B**) desbloquea clientes que ya bancarizan en AIBank sin depender del KYB propio de Mercatus, y
+evita que Mercatus custodie dinero ajeno -- decisión del usuario: **ir por los dos, con A como
+producto principal y B como rampa**.
+
+El equipo de AIBank respondió con una especificación técnica completa de los dos modelos
+(`13-spec-modelos-a-y-b.md`, fuera de este repo) -- ambos ya en su sandbox de su lado. Puntos clave:
+
+- **Un solo contrato de pago para los dos modelos.** Mismos endpoints (`authorize`/`capture`/
+  `refund`/`GET`), mismos códigos de error, misma vigencia de 15 minutos, misma idempotencia. Lo
+  único que cambia es un campo: `mandate_id` presente = modelo B, ausente = modelo A.
+- **Modelo B es de 4 pasos**: (1) Mercatus pide consentimiento (`POST /v1/consent-requests`) --
+  **sin indicar cuenta**, a propósito: el titular elige sobre cuál, no Mercatus; (2) el titular
+  aprueba en la app de AIBank (autenticación propia, ve quién pide y para qué, puede bajar los
+  topes); (3) Mercatus paga con el `mandate_id` resultante; (4) puede consultar el consumo
+  (`consumed`/`remaining`, derivado del estado en vivo, no un contador aparte). El titular puede
+  revocar en cualquier momento (`403 mandate_revoked`); una retención sin capturar sigue
+  consumiendo el tope hasta que se resuelve.
+- **Aviso legal urgente que llegó con la spec, sin resolver**: en el modelo A, Mercatus recibe y
+  mantiene dinero de clientes (Q4/Q5 ya confirmados) -- eso podría equivaler a emitir dinero
+  electrónico en Perú (figura EEDE), algo que un abogado regulatorio peruano tiene que confirmar
+  ANTES del KYB, porque podría cambiar cuál modelo es el principal. El modelo B no tiene este
+  problema porque el dinero nunca es de Mercatus.
+
+**Implementado en esta sesión** (backend + protocolo, sin UI todavía -- ver pendientes):
+
+`payments/mock_aibank.py` -- nuevas `ConsentRequest`/`Mandate`/`MandateUsage` y los métodos del
+ciclo de vida del modelo B: `request_consent` (rechaza `purpose` vacío), `simulate_titular_approval`
+(sin equivalente en la API real -- existe solo porque este mock no tiene una app de banco de verdad
+que un humano use; en producción Mercatus haría polling de `get_consent_request` hasta ver
+`approved`), `get_mandate`, `revoke_mandate`, `mandate_usage` (deriva `consumed`/`remaining` de las
+autorizaciones vivas, nunca un contador aparte -- un reembolso libera el tope solo), y
+`authorize_with_mandate` (mismo contrato que `authorize`, pero la autoridad la da el mandato:
+`mandate_not_found`/`mandate_revoked`/`mandate_expired`/`mandate_account_not_covered`/
+`mandate_limit_exceeded` en vez de `invalid_credential`). `capture`/`refund` se generalizaron para
+aceptar identificar a quien llama por `credential` (modelo A) o por `account_id` directo (modelo B,
+que no tiene API key por cuenta) -- sin romper ningún test existente del modelo A.
+
+`payments/aibank_credential.py` -- `AIBankMandateCredential(mandate_id, account_id)`, deliberadamente
+SIN heredar de `AIBankCredential`: no es "una cuenta con su clave", es "un permiso que otra persona ya
+concedió" -- mezclarlas escondería esa diferencia real detrás de campos que no tendrían sentido en un
+lado o el otro.
+
+`payments/protocols/ap2_protocol.py`/`protocols/base.py` -- `PayerCredential` se amplió a
+`WalletSigner | AIBankCredential | AIBankMandateCredential` (ensanchar sigue siendo válido para
+Liskov, cero `type: ignore` nuevos). `build_buyer_client` trata ambas credenciales de AIBank como el
+mismo riel `SettlementRail.AIBANK` -- correcto, porque el contrato de pago es idéntico entre modelos,
+tal como especifica el documento; `_AP2BuyerClient._pay_aibank` es quien decide, por el tipo de
+credencial, si llama `authorize`+`capture` (modelo A) o `authorize_with_mandate`+`capture` (modelo B).
+
+Verificado: 9 tests nuevos en `tests/payments/test_mock_aibank.py` (cubren los escenarios 21-23 y
+25-30 de la spec de AIBank: flujo completo, `purpose` vacío, límite por operación, revocación, cuenta
+declarada distinta a la del mandato, mandato inexistente, `consumed`/`remaining` tras captura y
+reembolso, doble aprobación de la misma solicitud) + 1 test de integración end-to-end en
+`tests/payments/protocols/test_ap2_aibank_settlement.py` que paga sobre AP2 con un
+`AIBankMandateCredential` real, contra un vendedor corriendo en un servidor uvicorn de verdad. Suite
+completa 158/158, `ruff`/`mypy` limpios.
+
+**Pendiente, explícitamente fuera de esta sesión:**
+
+1. **Cliente HTTP real** contra el sandbox de AIBank -- bloqueado por falta de: la URL base y las
+   credenciales OAuth2 `client_credentials` del sandbox, y los documentos 11 y 12 que la spec 13
+   referencia (`11-spec-integracion-sandbox.md`, con la tabla completa de errores y los primeros 20
+   escenarios del modelo A; `12-modelo-b-iniciacion-de-pagos.md`, el análisis detrás del diseño del
+   modelo B) y el archivo `contracts/openapi/mercatus-v1.yaml` -- ninguno de los tres está disponible
+   en este entorno todavía.
+2. **UI del dashboard para el modelo B**: iniciar una `ConsentRequest`, mostrarle al usuario el
+   `handoff_code`/link para completar en la app de AIBank, y hacer polling hasta que el mandato
+   quede `approved` -- no existe todavía ningún flujo de credencial "asíncrona" en el dashboard (Circle
+   y AIBank modelo A se resuelven de forma síncrona, completando un formulario). Requiere diseño de
+   UX propio.
+3. **CLI/demo** para ejercitar el modelo B de punta a punta fuera de tests (`agent-commerce demo`
+   hoy solo conoce el modelo A de AIBank).
+4. La consulta legal sobre si el modelo A equivale a emitir dinero electrónico en Perú (bloqueante
+   real, fuera del alcance de este framework).
+
 <a id="rm-19"></a>
 
 ## RM-19 — Configurar wallet del comprador desde el dashboard

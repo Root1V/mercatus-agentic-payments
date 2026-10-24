@@ -13,6 +13,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -20,7 +21,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from agent_commerce.config import Mode, Protocol, Settings, SettlementRail
-from agent_commerce.payments.aibank_credential import AIBankCredential
+from agent_commerce.payments.aibank_credential import AIBankCredential, AIBankMandateCredential
 from agent_commerce.payments.protocols.ap2_protocol import AP2Protocol
 
 
@@ -132,6 +133,50 @@ async def test_reusing_the_same_cart_mandate_twice_is_rejected() -> None:
         assert first.status_code == 200
         assert second.status_code == 402
         assert "cart_already_redeemed" in second.json()["error"]
+    finally:
+        server.should_exit = True
+
+
+async def test_paid_request_settles_via_aibank_model_b_mandate() -> None:
+    """Modelo B (`13-spec-modelos-a-y-b.md` §3): el comprador no trae una
+    API key propia -- trae un mandato que un titular real ya aprobó. El
+    contrato de pago (`CartMandate`/`PaymentMandate`, recibo) es idéntico al
+    del modelo A; lo único que cambia es la credencial."""
+    protocol = _new_protocol()
+    seller = AIBankCredential()
+    app = _build_app(protocol, pay_to=seller.account_id)
+    port = _free_port()
+    server = _run_app(app, port)
+
+    try:
+        titular_account_id = "acc_titular_real"
+        consent_request = protocol._bank.request_consent(
+            currency="USD",
+            max_per_operation=Decimal(1),
+            max_total=Decimal(10),
+            purpose="Pagos del agente de investigación de Acme S.A.",
+        )
+        mandate = protocol._bank.simulate_titular_approval(
+            consent_request_id=consent_request.id, account_id=titular_account_id
+        )
+        buyer = AIBankMandateCredential(mandate_id=mandate.id, account_id=titular_account_id)
+
+        buyer_client = protocol.build_buyer_client(buyer)
+        try:
+            result = await buyer_client.request(
+                "POST", f"http://127.0.0.1:{port}/echo", json={"hello": "world"}
+            )
+        finally:
+            await buyer_client.aclose()
+
+        assert result.status_code == 200
+        assert result.receipt is not None
+        assert result.receipt.payer == titular_account_id
+        assert result.receipt.pay_to == seller.account_id
+        assert str(result.receipt.amount_usd) == "0.001"
+
+        usage = protocol._bank.mandate_usage(mandate.id)
+        assert usage.consumed == Decimal("0.001")
     finally:
         server.should_exit = True
 

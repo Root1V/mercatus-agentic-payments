@@ -100,7 +100,7 @@ from x402.mechanisms.evm.types import ExactEIP3009Payload
 from x402.schemas.helpers import convert_to_token_amount, parse_money
 
 from agent_commerce.config import Settings, SettlementRail, get_settings
-from agent_commerce.payments.aibank_credential import AIBankCredential
+from agent_commerce.payments.aibank_credential import AIBankCredential, AIBankMandateCredential
 from agent_commerce.payments.facilitator_selection import build_facilitator_client
 from agent_commerce.payments.wallets.base import WalletSigner
 from agent_commerce.payments.wallets.local_eoa import LocalEoaSigner
@@ -466,17 +466,31 @@ class _AP2BuyerClient(BuyerClient):
 
     def _pay_aibank(self, pay_data: dict[str, Any]) -> tuple[dict[str, Any], str]:
         credential = self._credential
-        assert isinstance(credential, AIBankCredential)
         assert self._bank is not None
-
         amount = Decimal(parse_money(pay_data["price"])["amount"])
-        authorization = self._bank.authorize(
-            credential=credential,
-            pay_to_account_id=pay_data["payTo"],
-            amount=amount,
-            idempotency_key=uuid.uuid4().hex,
-        )
-        self._bank.capture(authorization_id=authorization.id, credential=credential)
+
+        if isinstance(credential, AIBankMandateCredential):
+            # Modelo B (`13-spec-modelos-a-y-b.md` §3.3): la autoridad la da
+            # el mandato, no una API key por cuenta -- ver docstring de
+            # `AIBankMandateCredential`. El mandato ya tiene que existir
+            # (pedido + aprobado por el titular fuera de este flujo de pago).
+            authorization = self._bank.authorize_with_mandate(
+                mandate_id=credential.mandate_id,
+                payer_account_id=credential.account_id,
+                pay_to_account_id=pay_data["payTo"],
+                amount=amount,
+                idempotency_key=uuid.uuid4().hex,
+            )
+            self._bank.capture(authorization_id=authorization.id, payer_account_id=credential.account_id)
+        else:
+            assert isinstance(credential, AIBankCredential)
+            authorization = self._bank.authorize(
+                credential=credential,
+                pay_to_account_id=pay_data["payTo"],
+                amount=amount,
+                idempotency_key=uuid.uuid4().hex,
+            )
+            self._bank.capture(authorization_id=authorization.id, credential=credential)
 
         details = {
             "aibankPayload": {"authorization_id": authorization.id, "payer_account_id": credential.account_id}
@@ -602,7 +616,12 @@ class AP2Protocol(PaymentProtocol):
         # cambiar de backend de wallet en caliente y el próximo pago sigue
         # el riel correcto sin reiniciar el proceso. `self._bank`/
         # `self._facilitator` siempre están construidos (ver `__init__`).
-        if isinstance(signer, AIBankCredential):
+        # `AIBankCredential` (modelo A) y `AIBankMandateCredential` (modelo
+        # B) comparten el mismo riel AIBANK -- el contrato de pago es
+        # idéntico entre los dos modelos (`13-spec-modelos-a-y-b.md` §1), lo
+        # único que cambia es qué credencial da la autoridad para pagar, y
+        # eso lo resuelve `_AP2BuyerClient._pay_aibank` por tipo.
+        if isinstance(signer, (AIBankCredential, AIBankMandateCredential)):
             return _AP2BuyerClient(httpx.AsyncClient(), signer, SettlementRail.AIBANK, _bank=self._bank)
         assert isinstance(signer, WalletSigner)
         scheme = ExactEvmClientScheme(signer)
