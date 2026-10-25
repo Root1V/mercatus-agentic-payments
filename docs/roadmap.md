@@ -643,15 +643,63 @@ completa 158/158, `ruff`/`mypy` limpios.
    escenarios del modelo A; `12-modelo-b-iniciacion-de-pagos.md`, el análisis detrás del diseño del
    modelo B) y el archivo `contracts/openapi/mercatus-v1.yaml` -- ninguno de los tres está disponible
    en este entorno todavía.
-2. **UI del dashboard para el modelo B**: iniciar una `ConsentRequest`, mostrarle al usuario el
-   `handoff_code`/link para completar en la app de AIBank, y hacer polling hasta que el mandato
-   quede `approved` -- no existe todavía ningún flujo de credencial "asíncrona" en el dashboard (Circle
-   y AIBank modelo A se resuelven de forma síncrona, completando un formulario). Requiere diseño de
-   UX propio.
+2. ~~UI del dashboard para el modelo B~~ -- hecho, ver la sección siguiente.
 3. **CLI/demo** para ejercitar el modelo B de punta a punta fuera de tests (`agent-commerce demo`
    hoy solo conoce el modelo A de AIBank).
 4. La consulta legal sobre si el modelo A equivale a emitir dinero electrónico en Perú (bloqueante
    real, fuera del alcance de este framework).
+
+### Modelo B en el dashboard
+
+"Configurar wallet" → AIBank ganó un segundo selector, **"De dónde sale el dinero"**: *Cuenta de
+Mercatus* (modelo A, los campos de siempre) o *Cuenta del cliente* (modelo B). El modelo B es el
+primer flujo de credencial **asíncrono** del dashboard -- Circle y AIBank ómnibus se resuelven
+completando un formulario; acá hay que esperar a que una persona decida en otra app -- y sigue el
+spec 13 §3 al pie de la letra:
+
+1. **Pedir permiso** (`POST /api/admin/aibank/consent-requests`): topes por pago y total, y un
+   propósito obligatorio (el titular lo lee literal en la pantalla del banco). Sin cuenta: la elige
+   el titular.
+2. **Esperar la decisión**: la UI muestra el `handoff_code` (con botón de copiar) y consulta cada 2 s
+   (`GET .../consent-requests/{id}`) -- el banco no notifica, igual que en producción.
+3. **Activar** (`POST .../{id}/activate`), automático al ver `approved`: el `mandate_id` sale del
+   banco, **nunca del cliente HTTP**, así que nadie puede "activar" un permiso que el titular no dio.
+   Se guarda en `wallet_settings` (migración `0006`: `aibank_model`, `aibank_mandate_id`,
+   `aibank_mandate_account_id`) y `_get_buyer_signer` empieza a devolver `AIBankMandateCredential`.
+4. **Ver el consumo** (`GET /api/admin/aibank/mandate`): estado (activo/revocado/vencido), medidor de
+   consumido vs. tope total, lo que queda, tope por pago y vencimiento -- se refresca tras cada pago.
+
+**Simulador del titular**, marcado visualmente aparte ("Simulador · reemplaza la app de AIBank"):
+`simulate-approval` (con opción de conceder un total MENOR al pedido -- el banco rechaza uno mayor,
+`cannot_raise_requested_limits`), `simulate-rejection` y `mandate/simulate-revocation`. No existen
+en el banco real, donde decide una persona autenticada con su dispositivo; existen solo porque la
+app de AIBank todavía no está construida (pendiente #1 de su lado, doc 13 §9).
+
+Pasar a "Cuenta de Mercatus" y volver **no pierde el mandato**: `upsert` conserva `aibank_model` y
+el mandato si no se mandan -- retomar el modelo B no obliga a pedirle permiso de nuevo al titular.
+El recibo distingue los dos modelos ("Firmado con AIBank (ómnibus)" / "(cuenta del cliente)").
+
+**Mejora de paso, fuera del modelo B**: los errores de la API se mostraban como el genérico de
+axios ("Request failed with status code 502"), perdiendo el `detail` del backend. Nuevo
+`frontend/src/lib/apiError.ts` extrae el `detail` y traduce los códigos de AIBank a una explicación
+por quién lo arregla -- el spec insiste en no confundir `mandate_limit_exceeded` (falta permiso: lo
+arregla el titular) con `insufficient_funds` (falta dinero: se arregla fondeando). Afecta también
+los errores de Circle y del guardado de la config. El diálogo de wallet ahora hace scroll si no
+entra en pantalla.
+
+Verificado: 15 tests de API nuevos (`tests/dashboard/test_aibank_mandate_api.py`: flujo completo,
+validaciones, 404/409, conceder menos, rechazo, pago con mandato, límite excedido, revocación, ida y
+vuelta ómnibus↔mandato sin perder el permiso), 2 del store SQL y 2 del mock -- suite 177/177,
+`ruff`/`mypy`/`tsc`/`eslint`/`vite build` limpios. Migración `0006` probada en Postgres real
+(upgrade → downgrade → upgrade → `alembic check` sin diferencias). Y de punta a punta en el
+navegador contra el dashboard real: pedir $0.005 → el titular concede solo $0.002 → la UI detecta
+la aprobación sola y activa → dos pagos AP2 desde la cuenta del titular (recibo "cuenta del
+cliente", medidor al 100%) → el tercero rechazado con el mensaje de "falta permiso, no saldo" →
+revocación → estado "Revocado" → pedido nuevo rechazado por el titular.
+
+**Limitación conocida**: `MockAIBank` vive en memoria, así que reiniciar el dashboard pierde los
+mandatos aunque `wallet_settings` los recuerde -- la UI lo detecta (`found: false`) y pide
+reconectar, en vez de fallar recién al pagar. Desaparece con el cliente HTTP real (pendiente #1).
 
 <a id="rm-19"></a>
 

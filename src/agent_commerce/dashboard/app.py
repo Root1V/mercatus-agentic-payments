@@ -36,6 +36,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -57,8 +58,10 @@ from agent_commerce.config import Protocol, Settings, SettlementRail, get_settin
 from agent_commerce.db.models import UserModel
 from agent_commerce.db.session import get_db
 from agent_commerce.llm.client import LLMClientError, PrometheusLLMClient
-from agent_commerce.payments.aibank_credential import AIBankCredential
+from agent_commerce.payments.aibank_credential import AIBankCredential, AIBankMandateCredential
 from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
+from agent_commerce.payments.mock_aibank import AIBankError, ConsentRequest, Mandate, MockAIBank
+from agent_commerce.payments.protocols.ap2_protocol import AP2Protocol
 from agent_commerce.payments.wallets.circle_wallet import CircleWalletSigner
 from agent_commerce.payments.wallets.local_eoa import LocalEoaSigner
 
@@ -168,6 +171,62 @@ class UpdateWalletSettingsRequest(BaseModel):
     # efímera si se dejan vacíos.
     aibank_account_id: str | None = None
     aibank_api_key: str | None = None
+    # "omnibus" (modelo A) | "mandate" (modelo B); None = conservar lo guardado.
+    # El mandato en sí NO se manda acá -- solo lo guarda `.../activate`, tras
+    # verificarlo contra el banco.
+    aibank_model: str | None = None
+
+
+class CreateConsentRequestRequest(BaseModel):
+    # USD fijo: el sandbox de AIBank arranca solo con USD (Q20).
+    max_per_operation_usd: Decimal
+    max_total_usd: Decimal
+    purpose: str
+
+
+class SimulateTitularApprovalRequest(BaseModel):
+    account_id: str
+    # None = conceder exactamente lo pedido; un valor menor simula que el
+    # titular bajó el tope en la app del banco (nunca puede subirlo).
+    max_per_operation_usd: Decimal | None = None
+    max_total_usd: Decimal | None = None
+
+
+_AIBANK_MODELS = ("omnibus", "mandate")
+
+
+def _consent_request_to_dict(request: ConsentRequest) -> dict[str, Any]:
+    return {
+        "consent_request_id": request.id,
+        "handoff_code": request.handoff_code,
+        "status": request.status,
+        "currency": request.currency,
+        "max_per_operation_usd": str(request.max_per_operation),
+        "max_total_usd": str(request.max_total),
+        "purpose": request.purpose,
+        "expires_at": datetime.fromtimestamp(request.expires_at, UTC).isoformat(),
+        "mandate_id": request.mandate_id,
+        "account_id": request.account_id,
+    }
+
+
+def _mandate_to_dict(bank: MockAIBank, mandate: Mandate) -> dict[str, Any]:
+    usage = bank.mandate_usage(mandate.id)
+    # El mock solo marca "expired" al intentar pagar (perezoso); acá se
+    # refleja la vigencia real para que la UI no muestre "activo" un mandato
+    # que ya no sirve.
+    status = "expired" if mandate.status == "active" and time.time() > mandate.expires_at else mandate.status
+    return {
+        "mandate_id": mandate.id,
+        "account_id": mandate.account_id,
+        "currency": mandate.currency,
+        "status": status,
+        "max_per_operation_usd": str(mandate.max_per_operation),
+        "max_total_usd": str(mandate.max_total),
+        "consumed_usd": str(usage.consumed),
+        "remaining_usd": str(usage.remaining),
+        "expires_at": datetime.fromtimestamp(mandate.expires_at, UTC).isoformat(),
+    }
 
 
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
@@ -255,6 +314,12 @@ def _wallet_settings_to_dict(settings_row: WalletSettings) -> dict[str, Any]:
         "circle_wallet_id": settings_row.circle_wallet_id,
         "aibank_account_id": settings_row.aibank_account_id,
         "has_aibank_api_key": settings_row.aibank_api_key is not None,
+        "aibank_model": settings_row.aibank_model or "omnibus",
+        # El `mandate_id` no autentica nada por sí solo (el banco además
+        # exige el token de plataforma y que el pagador coincida), así que se
+        # puede mostrar -- igual que `circle_wallet_id`.
+        "aibank_mandate_id": settings_row.aibank_mandate_id,
+        "aibank_mandate_account_id": settings_row.aibank_mandate_account_id,
         "updated_at": settings_row.updated_at.isoformat(),
     }
 
@@ -342,6 +407,13 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
     # `_resolve_ap2_rail`), y el vendedor tiene que poder anunciar el
     # `pay_to` correcto para cualquiera de los dos sin reiniciar.
     seller_signers = {name: build_wallet_signer(role="seller", settings=settings) for name in _PROTOCOL_NAMES}
+    # El banco con el que liquida el riel AIBank de AP2 -- el mismo contra el
+    # que se pide/consulta/revoca el mandato del modelo B (endpoints
+    # `/api/admin/aibank/...`), así que un mandato recién aprobado es
+    # inmediatamente pagable sin ningún paso de sincronización.
+    ap2_protocol = protocols["ap2"]
+    assert isinstance(ap2_protocol, AP2Protocol)
+    aibank = ap2_protocol.bank
     ap2_aibank_seller_credential = AIBankCredential(
         account_id=settings.aibank_seller_account_id,
         api_key=settings.aibank_seller_api_key.get_secret_value() if settings.aibank_seller_api_key else None,
@@ -487,17 +559,39 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                     "El backend de wallet 'aibank' solo aplica al protocolo AP2 -- elegí AP2 "
                     "arriba, o cambiá de backend desde 'Configurar wallet'.",
                 )
-            key: _WalletSignerKey = (
-                "aibank",
-                (settings_row.aibank_account_id if settings_row else None) or "",
-                (settings_row.aibank_api_key if settings_row else None) or "",
-            )
-            if wallet_signer_holder.key != key:
-                wallet_signer_holder.signer = AIBankCredential(
-                    account_id=settings_row.aibank_account_id if settings_row else None,
-                    api_key=settings_row.aibank_api_key if settings_row else None,
+            if settings_row is not None and settings_row.aibank_model == "mandate":
+                # Modelo B: la autoridad la da un mandato que el titular ya
+                # aprobó -- ver `AIBankMandateCredential`.
+                if not (settings_row.aibank_mandate_id and settings_row.aibank_mandate_account_id):
+                    raise HTTPException(
+                        500,
+                        "AIBank 'cuenta propia' (modelo B) requiere conectar una cuenta primero: "
+                        "en 'Configurar wallet' → AIBank → Cuenta propia, pedí el permiso y "
+                        "esperá a que el titular lo apruebe.",
+                    )
+                key: _WalletSignerKey = (
+                    "aibank_mandate",
+                    settings_row.aibank_mandate_id,
+                    settings_row.aibank_mandate_account_id,
                 )
-                wallet_signer_holder.key = key
+                if wallet_signer_holder.key != key:
+                    wallet_signer_holder.signer = AIBankMandateCredential(
+                        mandate_id=settings_row.aibank_mandate_id,
+                        account_id=settings_row.aibank_mandate_account_id,
+                    )
+                    wallet_signer_holder.key = key
+            else:
+                key = (
+                    "aibank",
+                    (settings_row.aibank_account_id if settings_row else None) or "",
+                    (settings_row.aibank_api_key if settings_row else None) or "",
+                )
+                if wallet_signer_holder.key != key:
+                    wallet_signer_holder.signer = AIBankCredential(
+                        account_id=settings_row.aibank_account_id if settings_row else None,
+                        api_key=settings_row.aibank_api_key if settings_row else None,
+                    )
+                    wallet_signer_holder.key = key
         elif backend == "circle":
             if settings_row is None or not (
                 settings_row.circle_api_key
@@ -811,6 +905,9 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             "circle_wallet_id": None,
             "aibank_account_id": None,
             "has_aibank_api_key": False,
+            "aibank_model": "omnibus",
+            "aibank_mandate_id": None,
+            "aibank_mandate_account_id": None,
             "updated_at": None,
         }
 
@@ -820,6 +917,8 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         if payload.backend not in ("local", "circle", "aibank"):
             raise HTTPException(400, f"Backend de wallet desconocido: {payload.backend}")
+        if payload.aibank_model is not None and payload.aibank_model not in _AIBANK_MODELS:
+            raise HTTPException(400, f"Modelo de AIBank desconocido: {payload.aibank_model}")
         store = SqlWalletSettingsStore(db)
         try:
             updated = store.upsert(
@@ -829,6 +928,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                 circle_wallet_id=payload.circle_wallet_id,
                 aibank_account_id=payload.aibank_account_id,
                 aibank_api_key=payload.aibank_api_key,
+                aibank_model=payload.aibank_model,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -837,6 +937,120 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         # detecta el cambio de configuración (por `key`) la próxima vez que
         # se use, igual que `_get_llm_client`.
         return _wallet_settings_to_dict(updated)
+
+    # --- AIBank modelo B: conectar la cuenta propia del cliente (RM-18) ---
+    #
+    # Reproduce el flujo de `13-spec-modelos-a-y-b.md` §3 contra el
+    # `MockAIBank` del riel AP2: pedir permiso → el titular decide en la app
+    # del banco → Mercatus consulta hasta ver `approved` → activa el mandato.
+    # Los endpoints `simulate-*` NO existen en el banco real: reemplazan la
+    # app de AIBank (donde el titular se autentica con su dispositivo) para
+    # poder ejercitar el flujo completo sin ella.
+
+    def _aibank_http_error(exc: AIBankError) -> HTTPException:
+        code = str(exc)
+        if code.endswith("_not_found"):
+            return HTTPException(404, code)
+        if code == "consent_request_already_resolved":
+            return HTTPException(409, code)
+        return HTTPException(400, code)
+
+    def _get_consent_request_or_404(consent_request_id: str) -> ConsentRequest:
+        request = aibank.get_consent_request(consent_request_id)
+        # Una solicitud vencida se ve igual que una inexistente (doc 13 §5).
+        if request is None or (request.status == "pending" and time.time() > request.expires_at):
+            raise HTTPException(404, "consent_request_not_found")
+        return request
+
+    @api.post("/admin/aibank/consent-requests", status_code=201)
+    async def api_create_aibank_consent_request(payload: CreateConsentRequestRequest) -> dict[str, Any]:
+        if payload.max_per_operation_usd <= 0 or payload.max_total_usd <= 0:
+            raise HTTPException(400, "Los topes tienen que ser mayores que cero.")
+        if payload.max_per_operation_usd > payload.max_total_usd:
+            raise HTTPException(400, "El tope por operación no puede superar el tope total.")
+        try:
+            request = aibank.request_consent(
+                currency="USD",
+                max_per_operation=payload.max_per_operation_usd,
+                max_total=payload.max_total_usd,
+                purpose=payload.purpose.strip(),
+            )
+        except AIBankError as exc:
+            raise _aibank_http_error(exc) from exc
+        return _consent_request_to_dict(request)
+
+    @api.get("/admin/aibank/consent-requests/{consent_request_id}")
+    async def api_get_aibank_consent_request(consent_request_id: str) -> dict[str, Any]:
+        return _consent_request_to_dict(_get_consent_request_or_404(consent_request_id))
+
+    @api.post("/admin/aibank/consent-requests/{consent_request_id}/activate")
+    async def api_activate_aibank_consent_request(
+        consent_request_id: str, db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
+        """Guarda como credencial del comprador el mandato de una solicitud
+        YA aprobada. El `mandate_id` sale del banco, nunca del cliente HTTP:
+        así nadie puede "activar" un mandato que el titular no concedió."""
+        request = _get_consent_request_or_404(consent_request_id)
+        if request.status != "approved" or request.mandate_id is None or request.account_id is None:
+            raise HTTPException(409, f"La solicitud no está aprobada (estado: {request.status}).")
+        updated = SqlWalletSettingsStore(db).set_aibank_mandate(
+            mandate_id=request.mandate_id, account_id=request.account_id
+        )
+        return _wallet_settings_to_dict(updated)
+
+    @api.post("/admin/aibank/consent-requests/{consent_request_id}/simulate-approval")
+    async def api_simulate_aibank_titular_approval(
+        consent_request_id: str, payload: SimulateTitularApprovalRequest
+    ) -> dict[str, Any]:
+        _get_consent_request_or_404(consent_request_id)
+        try:
+            mandate = aibank.simulate_titular_approval(
+                consent_request_id=consent_request_id,
+                account_id=payload.account_id.strip(),
+                max_per_operation=payload.max_per_operation_usd,
+                max_total=payload.max_total_usd,
+            )
+        except AIBankError as exc:
+            raise _aibank_http_error(exc) from exc
+        return _mandate_to_dict(aibank, mandate)
+
+    @api.post("/admin/aibank/consent-requests/{consent_request_id}/simulate-rejection")
+    async def api_simulate_aibank_titular_rejection(consent_request_id: str) -> dict[str, Any]:
+        _get_consent_request_or_404(consent_request_id)
+        try:
+            request = aibank.simulate_titular_rejection(consent_request_id=consent_request_id)
+        except AIBankError as exc:
+            raise _aibank_http_error(exc) from exc
+        return _consent_request_to_dict(request)
+
+    @api.get("/admin/aibank/mandate")
+    async def api_get_aibank_mandate(db: Session = Depends(get_db)) -> dict[str, Any]:
+        """El mandato activo del comprador, con su consumo (doc 13 §3.4):
+        saber cuánto queda permite pedir una ampliación ANTES de que un pago
+        falle. `found: false` = el mandato guardado ya no existe en el banco
+        (el `MockAIBank` vive en memoria: un reinicio del dashboard lo pierde)."""
+        settings_row = SqlWalletSettingsStore(db).get()
+        mandate_id = settings_row.aibank_mandate_id if settings_row else None
+        if mandate_id is None:
+            return {"configured": False}
+        mandate = aibank.get_mandate(mandate_id)
+        if mandate is None:
+            return {"configured": True, "found": False, "mandate_id": mandate_id}
+        return {"configured": True, "found": True, **_mandate_to_dict(aibank, mandate)}
+
+    @api.post("/admin/aibank/mandate/simulate-revocation")
+    async def api_simulate_aibank_mandate_revocation(db: Session = Depends(get_db)) -> dict[str, Any]:
+        settings_row = SqlWalletSettingsStore(db).get()
+        mandate_id = settings_row.aibank_mandate_id if settings_row else None
+        if mandate_id is None:
+            raise HTTPException(404, "mandate_not_found")
+        try:
+            aibank.revoke_mandate(mandate_id)
+        except AIBankError as exc:
+            raise _aibank_http_error(exc) from exc
+        mandate = aibank.get_mandate(mandate_id)
+        assert mandate is not None
+        return _mandate_to_dict(aibank, mandate)
 
     @api.post("/agents", status_code=201)
     async def api_create_agent(

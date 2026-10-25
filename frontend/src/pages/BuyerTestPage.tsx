@@ -3,8 +3,11 @@ import { CheckCircle2, Loader2, Settings as SettingsIcon, Wallet, XCircle } from
 import { useTestCall } from "@/hooks/useTestCall";
 import { useUpdateWalletSettings, useWalletSettings } from "@/hooks/useWallet";
 import type { ProtocolName } from "@/types/protocol";
-import type { WalletBackend, WalletSettings as WalletSettingsData } from "@/types/wallet";
+import type { PaymentReceiptDTO } from "@/types/testCall";
+import type { AibankModel, WalletBackend, WalletSettings as WalletSettingsData } from "@/types/wallet";
+import { apiErrorMessage } from "@/lib/apiError";
 import { truncateAddress } from "@/lib/format";
+import { AibankOwnAccountPanel } from "@/components/dashboard/AibankOwnAccountPanel";
 import { AppShell } from "@/components/layout/AppShell";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -24,10 +27,11 @@ import {
 import { CopyButton } from "@/components/ui/copy-button";
 import { ProtocolBadge } from "@/components/dashboard/ProtocolBadge";
 
-const WALLET_BACKEND_LABELS: Record<"local" | "circle" | "aibank", string> = {
+const WALLET_BACKEND_LABELS: Record<NonNullable<PaymentReceiptDTO["wallet_backend"]>, string> = {
   local: "wallet local",
   circle: "Circle",
-  aibank: "AIBank",
+  aibank: "AIBank (ómnibus)",
+  aibank_mandate: "AIBank (cuenta del cliente)",
 };
 
 const DEFAULT_TEXT =
@@ -135,9 +139,7 @@ export function BuyerTestPage() {
               <div className="flex flex-col items-center gap-2 py-10 text-center">
                 <XCircle className="size-8 text-destructive" />
                 <p className="text-sm font-medium text-destructive">La llamada falló</p>
-                <p className="text-xs text-muted-foreground">
-                  {(testCall.error as Error)?.message ?? "Error desconocido"}
-                </p>
+                <p className="max-w-sm text-xs text-muted-foreground">{apiErrorMessage(testCall.error)}</p>
               </div>
             )}
 
@@ -247,6 +249,7 @@ function WalletSettingsForm({
     circle_wallet_id: settings?.circle_wallet_id ?? "",
     aibank_account_id: settings?.aibank_account_id ?? "",
     aibank_api_key: "",
+    aibank_model: settings?.aibank_model ?? ("omnibus" as AibankModel),
   });
 
   function handleSubmit(event: FormEvent) {
@@ -256,8 +259,11 @@ function WalletSettingsForm({
       circle_api_key: form.circle_api_key ? form.circle_api_key : undefined,
       circle_entity_secret: form.circle_entity_secret ? form.circle_entity_secret : undefined,
       circle_wallet_id: form.backend === "circle" ? form.circle_wallet_id : null,
+      // El modelo B no edita la cuenta ómnibus: se conserva tal cual para
+      // poder volver a ella sin reescribirla.
       aibank_account_id: form.backend === "aibank" ? form.aibank_account_id || null : null,
       aibank_api_key: form.aibank_api_key ? form.aibank_api_key : undefined,
+      aibank_model: form.backend === "aibank" ? form.aibank_model : undefined,
     });
   }
 
@@ -320,32 +326,54 @@ function WalletSettingsForm({
             con x402 no aplica, es un riel exclusivamente bancario.
           </p>
           <div className="flex flex-col gap-1.5">
-            <Label>Cuenta de AIBank (opcional)</Label>
-            <Input
-              placeholder="se genera automático si lo dejás vacío"
-              value={form.aibank_account_id}
-              onChange={(e) => setForm({ ...form, aibank_account_id: e.target.value })}
-            />
+            <Label>De dónde sale el dinero</Label>
+            <Tabs
+              value={form.aibank_model}
+              onValueChange={(v) => setForm({ ...form, aibank_model: v as AibankModel })}
+            >
+              <TabsList>
+                <TabsTrigger value="omnibus">Cuenta de Mercatus</TabsTrigger>
+                <TabsTrigger value="mandate">Cuenta del cliente</TabsTrigger>
+              </TabsList>
+            </Tabs>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <Label>
-              {settings?.has_aibank_api_key
-                ? "API key de AIBank (dejar vacío para no cambiarla)"
-                : "API key de AIBank (opcional)"}
-            </Label>
-            <Input
-              type="password"
-              placeholder={settings?.has_aibank_api_key ? "••••••••" : "se genera automático si lo dejás vacío"}
-              value={form.aibank_api_key}
-              onChange={(e) => setForm({ ...form, aibank_api_key: e.target.value })}
-            />
-          </div>
+
+          {form.aibank_model === "omnibus" && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Modelo ómnibus: una sub-cuenta del agente bajo la cuenta maestra de Mercatus.
+              </p>
+              <div className="flex flex-col gap-1.5">
+                <Label>Cuenta de AIBank (opcional)</Label>
+                <Input
+                  placeholder="se genera automático si lo dejás vacío"
+                  value={form.aibank_account_id}
+                  onChange={(e) => setForm({ ...form, aibank_account_id: e.target.value })}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label>
+                  {settings?.has_aibank_api_key
+                    ? "API key de AIBank (dejar vacío para no cambiarla)"
+                    : "API key de AIBank (opcional)"}
+                </Label>
+                <Input
+                  type="password"
+                  placeholder={settings?.has_aibank_api_key ? "••••••••" : "se genera automático si lo dejás vacío"}
+                  value={form.aibank_api_key}
+                  onChange={(e) => setForm({ ...form, aibank_api_key: e.target.value })}
+                />
+              </div>
+            </>
+          )}
+
+          {form.aibank_model === "mandate" && <AibankOwnAccountPanel />}
         </>
       )}
 
       {updateSettings.isError && (
         <p className="text-sm text-destructive">
-          {(updateSettings.error as Error)?.message ?? "No se pudo guardar la configuración."}
+          {apiErrorMessage(updateSettings.error, "No se pudo guardar la configuración.")}
         </p>
       )}
       {updateSettings.isSuccess && (

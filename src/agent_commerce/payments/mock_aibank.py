@@ -214,8 +214,22 @@ class MockAIBank:
     def get_consent_request(self, consent_request_id: str) -> ConsentRequest | None:
         return self._consent_requests.get(consent_request_id)
 
+    def _pending_consent_request(self, consent_request_id: str) -> ConsentRequest:
+        request = self._consent_requests.get(consent_request_id)
+        if request is None or time.time() > request.expires_at:
+            raise AIBankError("consent_request_not_found")
+        if request.status != "pending":
+            raise AIBankError("consent_request_already_resolved")
+        return request
+
     def simulate_titular_approval(
-        self, *, consent_request_id: str, account_id: str, ttl_seconds: int = _MANDATE_DEFAULT_TTL_SECONDS
+        self,
+        *,
+        consent_request_id: str,
+        account_id: str,
+        max_per_operation: Decimal | None = None,
+        max_total: Decimal | None = None,
+        ttl_seconds: int = _MANDATE_DEFAULT_TTL_SECONDS,
     ) -> Mandate:
         """Sin equivalente en la API real que Mercatus llama -- en AIBank de
         verdad esto ocurre en SU app, con el titular autenticándose con su
@@ -223,21 +237,25 @@ class MockAIBank:
         una plataforma no puede conceder su propio permiso). Existe
         únicamente para poder probar el flujo del modelo B sin una interfaz
         de aprobación real -- lo que Mercatus haría en su lugar es hacer
-        `GET /v1/consent-requests/{id}` en un loop hasta ver `approved`."""
-        request = self._consent_requests.get(consent_request_id)
-        if request is None:
-            raise AIBankError("consent_request_not_found")
-        if time.time() > request.expires_at:
-            raise AIBankError("consent_request_not_found")
-        if request.status != "pending":
-            raise AIBankError("consent_request_already_resolved")
+        `GET /v1/consent-requests/{id}` en un loop hasta ver `approved`.
+
+        `max_per_operation`/`max_total` permiten simular que el titular
+        concede MENOS de lo pedido (doc 13 §3.2: puede bajar los topes,
+        nunca subirlos); `None` concede exactamente lo pedido."""
+        request = self._pending_consent_request(consent_request_id)
+        granted_per_operation = request.max_per_operation if max_per_operation is None else max_per_operation
+        granted_total = request.max_total if max_total is None else max_total
+        if granted_per_operation > request.max_per_operation or granted_total > request.max_total:
+            raise AIBankError("cannot_raise_requested_limits")
+        if granted_per_operation <= 0 or granted_total <= 0:
+            raise AIBankError("malformed_request")
 
         mandate = Mandate(
             id=str(uuid.uuid4()),
             account_id=account_id,
             currency=request.currency,
-            max_per_operation=request.max_per_operation,
-            max_total=request.max_total,
+            max_per_operation=granted_per_operation,
+            max_total=granted_total,
             status="active",
             expires_at=time.time() + ttl_seconds,
         )
@@ -246,6 +264,13 @@ class MockAIBank:
         request.mandate_id = mandate.id
         request.account_id = account_id
         return mandate
+
+    def simulate_titular_rejection(self, *, consent_request_id: str) -> ConsentRequest:
+        """Mismo caso que `simulate_titular_approval` (sin equivalente en la
+        API real), pero el titular rechaza: nunca nace el mandato (doc 13 §4)."""
+        request = self._pending_consent_request(consent_request_id)
+        request.status = "rejected"
+        return request
 
     def get_mandate(self, mandate_id: str) -> Mandate | None:
         return self._mandates.get(mandate_id)
