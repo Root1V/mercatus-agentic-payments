@@ -637,12 +637,14 @@ completa 158/158, `ruff`/`mypy` limpios.
 
 **Pendiente, explícitamente fuera de esta sesión:**
 
-1. **Cliente HTTP real** contra el sandbox de AIBank -- bloqueado por falta de: la URL base y las
-   credenciales OAuth2 `client_credentials` del sandbox, y los documentos 11 y 12 que la spec 13
-   referencia (`11-spec-integracion-sandbox.md`, con la tabla completa de errores y los primeros 20
-   escenarios del modelo A; `12-modelo-b-iniciacion-de-pagos.md`, el análisis detrás del diseño del
-   modelo B) y el archivo `contracts/openapi/mercatus-v1.yaml` -- ninguno de los tres está disponible
-   en este entorno todavía.
+1. **Cliente HTTP real** contra el sandbox de AIBank (hoy **Aerarium**). ~~Bloqueado por falta de URL,
+   credenciales, docs 11/12 y OpenAPI~~ -- **error nuestro**: los cuatro están públicos desde el
+   09/09 en https://github.com/Root1V/aerarium-agentic-banking (docs 11-13, `contracts/openapi/
+   mercatus-v1.yaml`, `SANDBOX.md`), y la URL y las credenciales se generan levantando el sandbox
+   localmente (`platform/docker-compose.sandbox.yml`, el secreto sale en `logs bootstrap`). Nunca se
+   miró ese repo. Lo señaló Aerarium en el canal compartido (AE-01). Antes del cliente hay que alinear
+   `MockAIBank` con la API real (AE-02/AE-03): un token OAuth2 por **integración** (no una clave por
+   cuenta), `payer_account_id` en el cuerpo, su vocabulario de errores y montos en micras enteras.
 2. ~~UI del dashboard para el modelo B~~ -- hecho, ver la sección siguiente.
 3. ~~**CLI/demo** para ejercitar el modelo B de punta a punta fuera de tests~~ -- hecho, ver
    "Modelo B en la CLI" más abajo.
