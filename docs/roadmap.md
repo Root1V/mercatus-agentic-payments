@@ -644,8 +644,8 @@ completa 158/158, `ruff`/`mypy` limpios.
    modelo B) y el archivo `contracts/openapi/mercatus-v1.yaml` -- ninguno de los tres está disponible
    en este entorno todavía.
 2. ~~UI del dashboard para el modelo B~~ -- hecho, ver la sección siguiente.
-3. **CLI/demo** para ejercitar el modelo B de punta a punta fuera de tests (`agent-commerce demo`
-   hoy solo conoce el modelo A de AIBank).
+3. ~~**CLI/demo** para ejercitar el modelo B de punta a punta fuera de tests~~ -- hecho, ver
+   "Modelo B en la CLI" más abajo.
 4. La consulta legal sobre si el modelo A equivale a emitir dinero electrónico en Perú (bloqueante
    real, fuera del alcance de este framework).
 
@@ -784,3 +784,29 @@ puede revisar aparte si se quiere.
 
 Verificado en el navegador: título de la pestaña, logo y nombre en el sidebar (autenticado) y en la
 pantalla de login (sin sesión) -- build (`npm run build`) y lint (`npm run lint`) limpios.
+
+### Modelo B en la CLI
+
+`agent-commerce demo --protocol ap2 --ap2-settlement aibank --aibank-model mandate` recorre el modelo B
+de punta a punta contra un vendedor real (uvicorn), imprimiendo los 4 pasos del spec 13 §3 en el orden
+en que ocurren en producción: (1) pedido de permiso sin cuenta (`handoff_code`, topes, propósito); (2)
+decisión del titular, **marcada como simulada** porque reemplaza a la app de AIBank; (3) pagos sobre la
+cuenta del cliente, con consumido/restante tras cada uno; (4) consumo final del mandato. Por default
+pide $0.001 por pago y $0.003 en total e intenta 4 pagos, así que el cuarto se topa con el límite --
+lo que la demo quiere mostrar: que el rechazo es `mandate_limit_exceeded` (falta de permiso, lo arregla
+el titular), no `insufficient_funds`.
+
+Opciones (solo con `--aibank-model mandate`; usarlas sin él es un error de uso, no un no-op silencioso):
+`--max-per-operation`/`--max-total` (lo que pide Mercatus), `--granted-total` (lo que concede el
+titular; mayor a lo pedido -> `cannot_raise_requested_limits`), `--payments`, `--titular-rejects` y
+`--revoke-after N`. `--aibank-model mandate` sin `ap2`+`aibank` también es error de uso. El script
+`examples/agent_to_agent_demo.py` ganó el mismo `--aibank-model` (con los defaults).
+
+`config.py` ganó `AIBankModel` (`omnibus`/`mandate`), que ahora también define los valores válidos que
+acepta el dashboard. `serve-example`+`call` siguen sin soportar AIBank entre procesos separados (misma
+limitación de siempre del `MockAIBank` en memoria, ver más arriba): el modelo B, como el A, se ejercita
+con `demo`, que corre vendedor y comprador en el mismo proceso.
+
+Verificado: 7 tests nuevos en `tests/cli/test_demo_mandate.py` (límite concedido menor al pedido,
+revocación, rechazo del titular, concesión mayor a lo pedido, y las tres validaciones de opciones).
+`demo` en x402, AP2 sobre x402 y AP2 sobre AIBank modelo A, sin regresión.

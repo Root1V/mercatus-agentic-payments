@@ -2,7 +2,8 @@
 
 Comandos:
 - `serve-example`: levanta el vendedor de ejemplo (text-summarizer) monetizado.
-- `demo`: corre la demo agente-a-agente de punta a punta e imprime el ledger.
+- `demo`: corre la demo agente-a-agente de punta a punta e imprime el ledger
+  (con `--aibank-model mandate`, el modelo B de AIBank: permiso del titular + pagos).
 - `catalog list`: lista los servicios del catálogo semilla.
 - `call`: como agente comprador, descubre y paga un servicio del catálogo.
 - `create-admin`: crea el único usuario admin del dashboard (sin auto-registro).
@@ -12,11 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import typer
 
-from agent_commerce.config import Mode, Protocol, Settings, SettlementRail
+from agent_commerce.config import AIBankModel, Mode, Protocol, Settings, SettlementRail
 
 app = typer.Typer(help="Framework de doble cara para agentic commerce (x402 + AP2).")
 catalog_app = typer.Typer(help="Consultar el catálogo de servicios.")
@@ -63,20 +65,93 @@ def serve_example(
     uvicorn.run(fastapi_app, host="127.0.0.1", port=port)
 
 
+def _parse_usd(value: str, option: str) -> Decimal:
+    """`"0.003"` o `"$0.003"` -> `Decimal("0.003")`; rechaza montos <= 0."""
+    try:
+        amount = Decimal(value.strip().lstrip("$"))
+    except InvalidOperation as exc:
+        raise typer.BadParameter(f"monto inválido: {value!r}", param_hint=option) from exc
+    if not amount.is_finite() or amount <= 0:
+        raise typer.BadParameter(f"el monto tiene que ser mayor a cero: {value!r}", param_hint=option)
+    return amount
+
+
+_MANDATE_ONLY = "Solo con --aibank-model mandate."
+
+
 @app.command("demo")
 def demo(
     protocol: Protocol = typer.Option(Protocol.X402, "--protocol"),
     ap2_settlement: SettlementRail = typer.Option(
         SettlementRail.X402, "--ap2-settlement", help="Solo con --protocol ap2: riel de liquidación (RM-18)."
     ),
+    aibank_model: AIBankModel = typer.Option(
+        AIBankModel.OMNIBUS,
+        "--aibank-model",
+        help="Solo con --ap2-settlement aibank: cuenta de Mercatus (omnibus) o del cliente (mandate).",
+    ),
+    max_per_operation: str | None = typer.Option(
+        None, "--max-per-operation", help=f"Tope por pago que pide Mercatus (default $0.001). {_MANDATE_ONLY}"
+    ),
+    max_total: str | None = typer.Option(
+        None, "--max-total", help=f"Tope total que pide Mercatus (default $0.003). {_MANDATE_ONLY}"
+    ),
+    granted_total: str | None = typer.Option(
+        None,
+        "--granted-total",
+        help=f"Tope total que concede el titular, menor o igual al pedido (default: lo pedido). {_MANDATE_ONLY}",
+    ),
+    payments: int | None = typer.Option(
+        None, "--payments", min=1, help=f"Cuántos pagos intenta el agente (default 4). {_MANDATE_ONLY}"
+    ),
+    titular_rejects: bool = typer.Option(
+        False, "--titular-rejects", help=f"El titular rechaza el permiso en vez de aprobarlo. {_MANDATE_ONLY}"
+    ),
+    revoke_after: int | None = typer.Option(
+        None, "--revoke-after", min=1, help=f"El titular revoca el permiso tras el pago N. {_MANDATE_ONLY}"
+    ),
     mode: Mode = typer.Option(Mode.MOCK, "--mode"),
     port: int = typer.Option(8901, "--port"),
 ) -> None:
-    """Corre la demo agente-a-agente de punta a punta (vendedor + comprador)."""
-    _ensure_examples_importable()
-    from examples.agent_to_agent_demo import run_demo
+    """Corre la demo agente-a-agente de punta a punta (vendedor + comprador).
 
-    asyncio.run(run_demo(protocol.value, mode.value, port, ap2_settlement=ap2_settlement.value))
+    Con `--protocol ap2 --ap2-settlement aibank --aibank-model mandate` recorre
+    el modelo B: pide permiso al titular, simula su decisión y paga sobre la
+    cuenta del cliente hasta toparse con el límite concedido."""
+    _ensure_examples_importable()
+    from examples.agent_to_agent_demo import MandateDemo, run_demo
+
+    mandate_options = {
+        "--max-per-operation": max_per_operation,
+        "--max-total": max_total,
+        "--granted-total": granted_total,
+        "--payments": payments,
+        "--titular-rejects": titular_rejects or None,
+        "--revoke-after": revoke_after,
+    }
+    mandate: MandateDemo | None = None
+    if aibank_model is AIBankModel.MANDATE:
+        if protocol is not Protocol.AP2 or ap2_settlement is not SettlementRail.AIBANK:
+            raise typer.BadParameter(
+                "el modelo B solo existe con --protocol ap2 --ap2-settlement aibank", param_hint="--aibank-model"
+            )
+        defaults = MandateDemo()
+        mandate = MandateDemo(
+            max_per_operation=_parse_usd(max_per_operation, "--max-per-operation") if max_per_operation else defaults.max_per_operation,
+            max_total=_parse_usd(max_total, "--max-total") if max_total else defaults.max_total,
+            granted_max_total=_parse_usd(granted_total, "--granted-total") if granted_total else None,
+            payments=payments or defaults.payments,
+            titular_rejects=titular_rejects,
+            revoke_after=revoke_after,
+        )
+    else:
+        used = [name for name, value in mandate_options.items() if value is not None]
+        if used:
+            raise typer.BadParameter(_MANDATE_ONLY.lower(), param_hint=", ".join(used))
+
+    asyncio.run(
+        run_demo(protocol.value, mode.value, port, ap2_settlement=ap2_settlement.value, mandate=mandate)
+    )
 
 
 @catalog_app.command("list")

@@ -38,6 +38,16 @@ class SettlementRail(str, Enum):
     AIBANK = "aibank"
 
 
+class AIBankModel(str, Enum):
+    """De quién es la cuenta de AIBank que paga (`13-spec-modelos-a-y-b.md`):
+    `omnibus` (modelo A, sub-cuenta del agente bajo la cuenta de Mercatus,
+    con su API key) o `mandate` (modelo B, la cuenta propia del cliente,
+    con un permiso que su titular aprobó en la app del banco)."""
+
+    OMNIBUS = "omnibus"
+    MANDATE = "mandate"
+
+
 class WalletBackend(str, Enum):
     LOCAL = "local"
     CIRCLE = "circle"
