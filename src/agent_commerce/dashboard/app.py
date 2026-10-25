@@ -54,7 +54,7 @@ from agent_commerce.auth.router import router as auth_router
 from agent_commerce.catalog.models import ServiceListing
 from agent_commerce.catalog.registry import InMemoryServiceRegistry
 from agent_commerce.client.paying_agent import NoMatchingServiceError, PayingAgent
-from agent_commerce.config import Protocol, Settings, SettlementRail, get_settings
+from agent_commerce.config import AIBankModel, Protocol, Settings, SettlementRail, get_settings
 from agent_commerce.db.models import UserModel
 from agent_commerce.db.session import get_db
 from agent_commerce.llm.client import LLMClientError, PrometheusLLMClient
@@ -192,7 +192,7 @@ class SimulateTitularApprovalRequest(BaseModel):
     max_total_usd: Decimal | None = None
 
 
-_AIBANK_MODELS = ("omnibus", "mandate")
+_AIBANK_MODELS = tuple(model.value for model in AIBankModel)
 
 
 def _consent_request_to_dict(request: ConsentRequest) -> dict[str, Any]:
