@@ -553,6 +553,14 @@ class AP2Protocol(PaymentProtocol):
         self._bank: MockAIBank = MockAIBank()
         self._facilitator = build_facilitator_client(self._settings)
 
+    @property
+    def bank(self) -> MockAIBank:
+        """El `MockAIBank` que liquida el riel AIBank de esta instancia --
+        expuesto para que el dashboard pueda manejar el ciclo de vida del
+        consentimiento/mandato del modelo B (pedir, consultar, revocar)
+        contra el MISMO banco con el que después se paga."""
+        return self._bank
+
     def mount_seller(
         self,
         app: FastAPI,

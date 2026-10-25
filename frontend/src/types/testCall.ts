@@ -14,7 +14,9 @@ export interface PaymentReceiptDTO {
   pay_to: string;
   amount_usd: string;
   settlement_id: string;
-  wallet_backend: "local" | "circle" | "aibank" | null;
+  // "aibank" = modelo ómnibus; "aibank_mandate" = cuenta propia del cliente
+  // con su mandato (modelo B).
+  wallet_backend: "local" | "circle" | "aibank" | "aibank_mandate" | null;
 }
 
 export interface TestCallResult {

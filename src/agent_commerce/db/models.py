@@ -152,6 +152,13 @@ class WalletSettingsModel(Base):
     # no hace falta exigirlos la primera vez que se elige este backend.
     aibank_account_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     aibank_api_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # AIBank modelo B (cuenta propia, RM-18): "omnibus" (modelo A, default
+    # si es NULL) o "mandate". El mandato activo NO se edita a mano: solo lo
+    # escribe `POST /api/admin/aibank/consent-requests/{id}/activate`, tras
+    # verificar contra el banco que el titular lo aprobó.
+    aibank_model: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    aibank_mandate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    aibank_mandate_account_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

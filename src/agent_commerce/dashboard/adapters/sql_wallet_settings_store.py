@@ -20,6 +20,9 @@ def _to_settings(model: WalletSettingsModel) -> WalletSettings:
         aibank_account_id=model.aibank_account_id,
         aibank_api_key=model.aibank_api_key,
         updated_at=model.updated_at,
+        aibank_model=model.aibank_model,
+        aibank_mandate_id=model.aibank_mandate_id,
+        aibank_mandate_account_id=model.aibank_mandate_account_id,
     )
 
 
@@ -40,6 +43,7 @@ class SqlWalletSettingsStore:
         circle_wallet_id: str | None,
         aibank_account_id: str | None,
         aibank_api_key: str | None,
+        aibank_model: str | None = None,
     ) -> WalletSettings:
         model = self._db.get(WalletSettingsModel, _SINGLETON_ID)
         if backend == "circle":
@@ -63,6 +67,23 @@ class SqlWalletSettingsStore:
         model.aibank_account_id = aibank_account_id
         if aibank_api_key is not None:
             model.aibank_api_key = aibank_api_key
+        if aibank_model is not None:
+            model.aibank_model = aibank_model
+
+        self._db.commit()
+        self._db.refresh(model)
+        return _to_settings(model)
+
+    def set_aibank_mandate(self, *, mandate_id: str, account_id: str) -> WalletSettings:
+        model = self._db.get(WalletSettingsModel, _SINGLETON_ID)
+        if model is None:
+            model = WalletSettingsModel(id=_SINGLETON_ID, backend="aibank")
+            self._db.add(model)
+
+        model.backend = "aibank"
+        model.aibank_model = "mandate"
+        model.aibank_mandate_id = mandate_id
+        model.aibank_mandate_account_id = account_id
 
         self._db.commit()
         self._db.refresh(model)

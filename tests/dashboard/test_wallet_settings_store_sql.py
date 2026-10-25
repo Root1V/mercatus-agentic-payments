@@ -166,3 +166,41 @@ def test_upsert_aibank_without_api_key_keeps_existing_one(db_session: Session) -
 
     assert updated.aibank_account_id == "account-2"
     assert updated.aibank_api_key == "key-1"
+
+
+def test_set_aibank_mandate_on_empty_store_switches_to_model_b(db_session: Session) -> None:
+    store = SqlWalletSettingsStore(db_session)
+    saved = store.set_aibank_mandate(mandate_id="4a7b1c2d", account_id="acc_titular")
+    assert saved.backend == "aibank"
+    assert saved.aibank_model == "mandate"
+    assert saved.aibank_mandate_id == "4a7b1c2d"
+    assert saved.aibank_mandate_account_id == "acc_titular"
+
+
+def test_upsert_keeps_mandate_and_model_when_not_given(db_session: Session) -> None:
+    """Editar el resto de la config (o pasar a ómnibus y volver) no borra
+    el mandato: retomarlo no obliga a pedirle permiso de nuevo al titular."""
+    store = SqlWalletSettingsStore(db_session)
+    store.set_aibank_mandate(mandate_id="4a7b1c2d", account_id="acc_titular")
+
+    kept = store.upsert(
+        backend="aibank",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id=None,
+        aibank_api_key=None,
+    )
+    assert kept.aibank_model == "mandate"
+
+    omnibus = store.upsert(
+        backend="aibank",
+        circle_api_key=None,
+        circle_entity_secret=None,
+        circle_wallet_id=None,
+        aibank_account_id=None,
+        aibank_api_key=None,
+        aibank_model="omnibus",
+    )
+    assert omnibus.aibank_model == "omnibus"
+    assert omnibus.aibank_mandate_id == "4a7b1c2d"

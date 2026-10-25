@@ -304,3 +304,32 @@ def test_wrong_api_key_for_a_known_account_is_rejected() -> None:
         bank.authorize(
             credential=impostor, pay_to_account_id=seller.account_id, amount=Decimal(1), idempotency_key="k2"
         )
+
+
+def test_model_b_titular_can_grant_less_but_never_more_than_requested() -> None:
+    """Doc 13 §3.2: el titular puede bajar los topes, nunca subirlos."""
+    bank = MockAIBank()
+    request = bank.request_consent(
+        currency="USD", max_per_operation=Decimal(5), max_total=Decimal(50), purpose="test"
+    )
+    with pytest.raises(AIBankError, match="cannot_raise_requested_limits"):
+        bank.simulate_titular_approval(
+            consent_request_id=request.id, account_id="acc_titular", max_total=Decimal(51)
+        )
+
+    mandate = bank.simulate_titular_approval(
+        consent_request_id=request.id, account_id="acc_titular", max_total=Decimal(20)
+    )
+    assert mandate.max_total == Decimal(20) and mandate.max_per_operation == Decimal(5)
+
+
+def test_model_b_rejected_request_cannot_be_approved_afterwards() -> None:
+    bank = MockAIBank()
+    request = bank.request_consent(
+        currency="USD", max_per_operation=Decimal(1), max_total=Decimal(1), purpose="test"
+    )
+    rejected = bank.simulate_titular_rejection(consent_request_id=request.id)
+    assert rejected.status == "rejected" and rejected.mandate_id is None
+
+    with pytest.raises(AIBankError, match="consent_request_already_resolved"):
+        bank.simulate_titular_approval(consent_request_id=request.id, account_id="acc_titular")

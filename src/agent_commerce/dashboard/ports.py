@@ -212,6 +212,11 @@ class WalletSettings:
     aibank_account_id: str | None
     aibank_api_key: str | None
     updated_at: datetime
+    # AIBank modelo B (cuenta propia): "omnibus" | "mandate" -- `None` en
+    # filas anteriores a la migración 0006 equivale a "omnibus".
+    aibank_model: str | None = None
+    aibank_mandate_id: str | None = None
+    aibank_mandate_account_id: str | None = None
 
 
 @runtime_checkable
@@ -231,10 +236,19 @@ class WalletSettingsStore(Protocol):
         circle_wallet_id: str | None,
         aibank_account_id: str | None,
         aibank_api_key: str | None,
+        aibank_model: str | None = None,
     ) -> WalletSettings:
         """Crea o actualiza la fila única. `circle_api_key`/`circle_entity_secret`/
         `aibank_api_key` en `None` conservan lo ya guardado (son credenciales
         -- el API key de Circle y el de AIBank autentican solos, no son
         identificadores públicos como el `client_id` de OAuth2 -- así se
-        puede editar el resto sin reescribirlos)."""
+        puede editar el resto sin reescribirlos). `aibank_model` en `None`
+        también conserva lo guardado. El mandato del modelo B nunca se toca
+        acá -- ver `set_aibank_mandate`."""
+        ...
+
+    def set_aibank_mandate(self, *, mandate_id: str, account_id: str) -> WalletSettings:
+        """Guarda el mandato recién aprobado y deja al comprador en AIBank
+        modelo B. Solo se llama después de verificar contra el banco que el
+        titular lo aprobó -- nunca con datos que mande el cliente HTTP."""
         ...
