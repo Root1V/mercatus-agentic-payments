@@ -30,6 +30,7 @@ minutos ni depender de datos de otra corrida.
 
 from __future__ import annotations
 
+import json
 import secrets
 import time
 import uuid
@@ -43,14 +44,27 @@ from .aibank_api import (
     SCOPE_PAYMENTS_READ,
     SCOPE_PAYMENTS_WRITE,
     Account,
+    Agent,
+    AgentKey,
     AIBankApi,
     AIBankError,
     Authorization,
     ConsentRequest,
     HolderChannel,
+    Intent,
     Mandate,
     Refund,
     TestHolder,
+    authorization_body,
+)
+from .aibank_signing import (
+    AgentIdentity,
+    SignatureError,
+    generate_agent_key,
+    public_jwk,
+    public_key_from_jwk,
+    sign_request,
+    verify_request,
 )
 
 # 15 minutos de vigencia de una retención (Q8, confirmado en doc 13 §1).
@@ -58,6 +72,11 @@ AUTHORIZATION_TTL_SECONDS = 900
 
 # Una hora de vigencia de una solicitud de consentimiento sin resolver.
 CONSENT_REQUEST_TTL_SECONDS = 3600
+
+# Tras rotar, las claves anteriores valen 7 días más salvo retiro antes (AE-11).
+ROTATED_KEY_GRACE_SECONDS = 7 * 86400
+
+_AUTHORIZATIONS_PATH = "/v1/authorizations"
 
 _LIVE_AUTHORIZATION_STATUSES = ("authorized", "captured", "partially_refunded")
 
@@ -85,6 +104,9 @@ class _Account:
     # Id de esta cuenta en el canal del titular (UUID), distinto del `acc_...`
     # de la API de socio -- igual que en Aerarium (AE-06).
     holder_ref: str | None = None
+    # El agente que puede pagar desde esta sub-cuenta (1.1). Sin agente -- la
+    # de un vendedor -- cobra, pero no paga.
+    agent_id: str | None = None
 
 
 @dataclass
@@ -115,6 +137,7 @@ class _ConsentRequest:
     expires_at: float
     mandate_id: str | None = None
     account_id: str | None = None
+    agent_id: str | None = None
 
 
 @dataclass
@@ -123,11 +146,31 @@ class _Mandate:
     account_id: str
     grantee: str  # client_id de la integración a la que se le concedió
     customer_id: str
+    agent_id: str | None  # None solo en mandatos anteriores a la 1.1
     currency: str
     max_per_operation: int | None
     max_total: int | None
     status: str  # "active" | "revoked" | "expired"
     expires_at: float
+    revoked_at: float | None = None
+
+
+@dataclass
+class _AgentKey:
+    id: str
+    public_key: dict[str, str]
+    created_at: float
+    expires_at: float | None = None
+    retired_at: float | None = None
+
+
+@dataclass
+class _Agent:
+    id: str
+    client_id: str
+    name: str
+    created_at: float
+    keys: dict[str, _AgentKey]
     revoked_at: float | None = None
 
 
@@ -152,6 +195,7 @@ class MockAIBank:
         self._consent_requests: dict[str, _ConsentRequest] = {}
         self._mandates: dict[str, _Mandate] = {}
         self._holders: dict[str, _Holder] = {}  # token -> titular
+        self._agents: dict[str, _Agent] = {}
 
     # ------------------------------------------------------------------
     # Controles de sandbox (sin equivalente en la API de socio)
@@ -177,7 +221,13 @@ class MockAIBank:
         return self._accounts[account_id].balance
 
     def provision_account(
-        self, *, client_id: str, owner_reference: str, initial_balance: int, currency: str = "USD"
+        self,
+        *,
+        client_id: str,
+        owner_reference: str,
+        initial_balance: int,
+        currency: str = "USD",
+        agent_id: str | None = None,
     ) -> Account:
         """`open_account` síncrono, para sembrar cuentas al arrancar (CLI,
         dashboard) sin un event loop. Mismas reglas e idempotencia."""
@@ -186,7 +236,14 @@ class MockAIBank:
             owner_reference=owner_reference,
             currency=currency,
             initial_balance=initial_balance,
+            agent_id=agent_id,
         )
+
+    def provision_agent(self, *, client_id: str, name: str) -> AgentIdentity:
+        """`register_agent` síncrono, con una clave nueva. Para sembrar al arrancar."""
+        private_key = generate_agent_key()
+        agent = self._register_agent(client_id=client_id, name=name, public_key=public_jwk(private_key))
+        return AgentIdentity(agent_id=agent.agent_id, key_id=agent.keys[0].key_id, private_key=private_key)
 
     # ------------------------------------------------------------------
     # Internos
@@ -249,10 +306,90 @@ class MockAIBank:
             return "expired"
         return request.status
 
+    # --- Agentes (contrato 1.1) ---------------------------------------------
+
+    def _live_agent(self, client_id: str, agent_id: str | None) -> _Agent:
+        agent = self._agents.get(agent_id or "")
+        if agent is None or agent.client_id != client_id:
+            raise AIBankError("agent_not_found", "el agente no existe")
+        if agent.revoked_at is not None:
+            raise AIBankError("agent_revoked", "el agente está dado de baja")
+        return agent
+
+    def _key_is_live(self, key: _AgentKey) -> bool:
+        return key.retired_at is None and (key.expires_at is None or self._now() <= key.expires_at)
+
+    def _register_agent(self, *, client_id: str, name: str, public_key: dict[str, str]) -> Agent:
+        if not name.strip():
+            raise AIBankError("malformed_request", "name es obligatorio: es lo que ve el titular")
+        key = self._new_key(public_key)
+        agent = _Agent(
+            id=f"agt_{uuid.uuid4().hex}", client_id=client_id, name=name, created_at=self._now(), keys={key.id: key}
+        )
+        self._agents[agent.id] = agent
+        return self._to_agent(agent)
+
+    def _new_key(self, public_key: dict[str, str]) -> _AgentKey:
+        try:
+            public_key_from_jwk(public_key)
+        except ValueError as exc:
+            raise AIBankError("malformed_request", str(exc)) from exc
+        if any(k.public_key == public_key for a in self._agents.values() for k in a.keys.values()):
+            raise AIBankError("agent_key_in_use", "esa clave ya está registrada")
+        return _AgentKey(id=f"key_{uuid.uuid4().hex}", public_key=dict(public_key), created_at=self._now())
+
+    def _get_agent(self, *, client_id: str, agent_id: str) -> Agent:
+        agent = self._agents.get(agent_id)
+        if agent is None or agent.client_id != client_id:
+            raise AIBankError("agent_not_found", "el agente no existe")
+        return self._to_agent(agent)
+
+    def _revoke_agent(self, *, client_id: str, agent_id: str) -> None:
+        agent = self._agents.get(agent_id)
+        if agent is None or agent.client_id != client_id:
+            raise AIBankError("agent_not_found", "el agente no existe")
+        if agent.revoked_at is None:
+            agent.revoked_at = self._now()
+
+    def _add_agent_key(self, *, client_id: str, agent_id: str, public_key: dict[str, str]) -> AgentKey:
+        agent = self._live_agent(client_id, agent_id)
+        key = self._new_key(public_key)
+        for old in agent.keys.values():
+            if self._key_is_live(old) and old.expires_at is None:
+                old.expires_at = self._now() + ROTATED_KEY_GRACE_SECONDS
+        agent.keys[key.id] = key
+        return self._to_agent_key(key)
+
+    def _retire_agent_key(self, *, client_id: str, agent_id: str, key_id: str) -> None:
+        agent = self._live_agent(client_id, agent_id)
+        key = agent.keys.get(key_id)
+        if key is None:
+            raise AIBankError("agent_not_found", "la clave no existe")
+        if not self._key_is_live(key):
+            return
+        if not any(self._key_is_live(k) for k in agent.keys.values() if k.id != key_id):
+            raise AIBankError("agent_last_key", "no se puede retirar la última clave viva del agente")
+        key.retired_at = self._now()
+
+    def _signer(self, client_id: str, key_id: str) -> tuple[_Agent, _AgentKey]:
+        for agent in self._agents.values():
+            key = agent.keys.get(key_id)
+            if key is not None:
+                if agent.client_id != client_id or agent.revoked_at is not None or not self._key_is_live(key):
+                    break
+                return agent, key
+        raise SignatureError("clave desconocida, vencida o de un agente dado de baja")
+
     # --- API de socio ----------------------------------------------------
 
     def _open_account(
-        self, *, client_id: str, owner_reference: str, currency: str, initial_balance: int | None
+        self,
+        *,
+        client_id: str,
+        owner_reference: str,
+        currency: str,
+        initial_balance: int | None,
+        agent_id: str | None = None,
     ) -> Account:
         if not owner_reference:
             raise AIBankError("malformed_request", "falta owner_reference")
@@ -277,7 +414,54 @@ class MockAIBank:
             self._accounts_by_owner[key] = account.id
             existing_id = account.id
         account = self._accounts[existing_id]
+        if agent_id is not None:
+            # Atar la cuenta a su agente; repetirlo con el mismo no es error
+            # (así se ata una cuenta abierta antes de la 1.1).
+            agent = self._live_agent(client_id, agent_id)
+            if account.agent_id not in (None, agent.id):
+                raise AIBankError("account_agent_conflict", "la cuenta ya pertenece a otro agente")
+            account.agent_id = agent.id
         return Account(account_id=account.id, currency=account.currency, status="active")
+
+    def _authorize_signed(
+        self, *, client_id: str, body: bytes, headers: dict[str, str], idempotency_key: str
+    ) -> Authorization:
+        """Lo que hace `handleAuthorize` en la 1.1: verificar la firma sobre el
+        cuerpo EXACTO recibido, y recién después leerlo."""
+        if not idempotency_key or len(idempotency_key) > 255:
+            raise AIBankError("malformed_request", "falta el encabezado Idempotency-Key")
+        try:
+            key_id = verify_request(
+                "POST",
+                _AUTHORIZATIONS_PATH,
+                body,
+                headers,
+                lambda kid: public_key_from_jwk(self._signer(client_id, kid)[1].public_key),
+                now=self._now(),
+            )
+        except SignatureError as exc:
+            raise AIBankError(
+                "agent_signature_invalid", "el pago tiene que venir firmado por un agente registrado de esta integración"
+            ) from exc
+        signer, _ = self._signer(client_id, key_id)
+        data = json.loads(body)
+        if data.get("agent_id") != signer.id:
+            raise AIBankError("agent_signature_invalid", "agent_id no es el dueño de la clave que firma")
+        raw_intent = data.get("intent")
+        intent = Intent(**raw_intent) if isinstance(raw_intent, dict) and set(raw_intent) == {"reference", "description"} else None
+        problem = intent.problem() if intent else "intent es obligatorio"
+        if problem:
+            raise AIBankError("malformed_request", problem)
+        return self._authorize(
+            client_id=client_id,
+            payer_account_id=data.get("payer_account_id", ""),
+            payee_account_id=data.get("payee_account_id", ""),
+            amount=data.get("amount"),
+            currency=data.get("currency", ""),
+            idempotency_key=idempotency_key,
+            mandate_id=data.get("mandate_id"),
+            signer_agent_id=signer.id,
+        )
 
     def _authorize(
         self,
@@ -289,10 +473,12 @@ class MockAIBank:
         currency: str,
         idempotency_key: str,
         mandate_id: str | None,
+        signer_agent_id: str,
     ) -> Authorization:
         # Mismo orden que `handleAuthorize`: forma de la petición, receptor
-        # propio, pagador (propio o del mandato), misma cuenta, y recién
-        # después las reglas del core (idempotencia, estado, saldo).
+        # propio, pagador (propio o del mandato), alcance del agente, misma
+        # cuenta, y recién después las reglas del core (idempotencia, estado,
+        # saldo).
         if not idempotency_key or len(idempotency_key) > 255:
             raise AIBankError("malformed_request", "falta el encabezado Idempotency-Key")
         if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
@@ -310,6 +496,15 @@ class MockAIBank:
             payer = self._accounts[mandate.account_id]
         else:
             payer = self._owned_account(client_id, payer_account_id)
+        if mandate is not None:
+            # Un mandato anterior a la 1.1 no tiene agente: sirve a cualquiera
+            # de la plataforma hasta que venza.
+            if mandate.agent_id is not None and mandate.agent_id != signer_agent_id:
+                raise AIBankError("mandate_agent_scope", "el permiso es de otro agente")
+        elif payer.agent_id != signer_agent_id:
+            raise AIBankError(
+                "account_agent_scope", "la cuenta pagadora no es de este agente; átala con agent_id al abrirla"
+            )
         if payer.id == payee.id:
             raise AIBankError("same_account", "pagador y receptor no pueden ser la misma cuenta")
 
@@ -358,17 +553,20 @@ class MockAIBank:
 
     def _capture(self, *, client_id: str, authorization_id: str) -> Authorization:
         authorization = self._owned_authorization(client_id, authorization_id)
+        # La tabla de captura de AE-14, fila por fila:
+        if authorization.status == "authorized" and self._now() > authorization.expires_at:
+            # Venció y el barrendero todavía no la liberó.
+            raise AIBankError("authorization_expired", "la autorización venció y el dinero se devuelve al pagador")
         self._sweep()
         if authorization.status == "authorized":
             self._accounts[authorization.payee].balance += authorization.amount
             authorization.status = "captured"
             authorization.settled_at = self._now()
         elif authorization.status == "expired":
-            raise AIBankError("authorization_expired", "la autorización venció y el dinero se devuelve al pagador")
-        elif authorization.status != "captured":
-            # Ya no está viva: se cobró y se devolvió (AE-08). Que el 409 no
-            # engañe: si el `GET` dice `refunded`, la captura original SÍ se hizo.
+            # Venció y se liberó sin cobrarse nunca.
             raise AIBankError("authorization_not_capturable", "la autorización ya no admite captura")
+        # Ya cobrada, aunque después se haya devuelto: `200`, mismo `settled_at`
+        # y el estado de hoy. Un reintento confirma la captura (AE-14).
         return self._to_authorization(authorization)
 
     def _get_authorization(
@@ -416,11 +614,17 @@ class MockAIBank:
         self,
         *,
         client_id: str,
+        agent_id: str,
         purpose: str,
         currency: str,
         max_per_operation: int | None,
         max_total: int | None,
     ) -> ConsentRequest:
+        if not agent_id:
+            raise AIBankError(
+                "malformed_request", "agent_id es obligatorio: el permiso se le da a un agente, no a la plataforma"
+            )
+        agent = self._live_agent(client_id, agent_id)
         if len(currency) != 3:
             raise AIBankError("malformed_request", "currency debe ser ISO-4217 de 3 letras")
         if not purpose or len(purpose) > 500:
@@ -438,6 +642,7 @@ class MockAIBank:
             purpose=purpose,
             status="pending",
             expires_at=self._now() + CONSENT_REQUEST_TTL_SECONDS,
+            agent_id=agent.id,
         )
         self._consent_requests[request.id] = request
         return self._to_consent_request(request)
@@ -524,6 +729,7 @@ class MockAIBank:
             account_id=account.id,
             grantee=request.client_id,
             customer_id=known.customer_id,
+            agent_id=request.agent_id,
             currency=account.currency,
             max_per_operation=max_per_operation,
             max_total=max_total,
@@ -576,6 +782,26 @@ class MockAIBank:
             expires_at=_to_datetime(request.expires_at),
             mandate_id=request.mandate_id if approved else None,
             account_id=request.account_id if approved else None,
+            agent_id=request.agent_id,
+        )
+
+    def _to_agent_key(self, key: _AgentKey) -> AgentKey:
+        return AgentKey(
+            key_id=key.id,
+            public_key=dict(key.public_key),
+            created_at=_to_datetime(key.created_at),
+            expires_at=_to_datetime(key.expires_at) if key.expires_at else None,
+            retired_at=_to_datetime(key.retired_at) if key.retired_at else None,
+        )
+
+    def _to_agent(self, agent: _Agent) -> Agent:
+        return Agent(
+            agent_id=agent.id,
+            name=agent.name,
+            status="revoked" if agent.revoked_at is not None else "active",
+            keys=tuple(self._to_agent_key(k) for k in agent.keys.values()),
+            created_at=_to_datetime(agent.created_at),
+            revoked_at=_to_datetime(agent.revoked_at) if agent.revoked_at else None,
         )
 
     def _to_refund(self, authorization: _Authorization, *, refunded: int) -> Refund:
@@ -619,6 +845,23 @@ class MockAIBankApi(AIBankApi):
     def _auth(self, scope: str) -> str:
         return self._bank._authenticate(self._client_id, self._client_secret, scope)
 
+    async def register_agent(self, *, name: str, public_key: dict[str, str]) -> Agent:
+        return self._bank._register_agent(client_id=self._auth(SCOPE_PAYMENTS_WRITE), name=name, public_key=public_key)
+
+    async def get_agent(self, agent_id: str) -> Agent:
+        return self._bank._get_agent(client_id=self._auth(SCOPE_PAYMENTS_READ), agent_id=agent_id)
+
+    async def revoke_agent(self, agent_id: str) -> None:
+        self._bank._revoke_agent(client_id=self._auth(SCOPE_PAYMENTS_WRITE), agent_id=agent_id)
+
+    async def add_agent_key(self, agent_id: str, *, public_key: dict[str, str]) -> AgentKey:
+        return self._bank._add_agent_key(
+            client_id=self._auth(SCOPE_PAYMENTS_WRITE), agent_id=agent_id, public_key=public_key
+        )
+
+    async def retire_agent_key(self, agent_id: str, key_id: str) -> None:
+        self._bank._retire_agent_key(client_id=self._auth(SCOPE_PAYMENTS_WRITE), agent_id=agent_id, key_id=key_id)
+
     async def open_account(
         self,
         *,
@@ -626,12 +869,14 @@ class MockAIBankApi(AIBankApi):
         currency: str = "USD",
         display_name: str | None = None,
         initial_balance: int | None = None,
+        agent_id: str | None = None,
     ) -> Account:
         return self._bank._open_account(
             client_id=self._auth(SCOPE_ACCOUNTS_WRITE),
             owner_reference=owner_reference,
             currency=currency,
             initial_balance=initial_balance,
+            agent_id=agent_id,
         )
 
     async def authorize(
@@ -641,17 +886,27 @@ class MockAIBankApi(AIBankApi):
         payee_account_id: str,
         amount: int,
         idempotency_key: str,
+        agent: AgentIdentity,
+        intent: Intent,
         currency: str = "USD",
         mandate_id: str | None = None,
     ) -> Authorization:
-        return self._bank._authorize(
-            client_id=self._auth(SCOPE_PAYMENTS_WRITE),
+        # Como un cliente HTTP real: se arma el cuerpo, se firma, y el banco
+        # verifica la firma sobre esos mismos bytes antes de leerlos.
+        body = authorization_body(
             payer_account_id=payer_account_id,
             payee_account_id=payee_account_id,
             amount=amount,
             currency=currency,
-            idempotency_key=idempotency_key,
             mandate_id=mandate_id,
+            agent=agent,
+            intent=intent,
+        )
+        return self._bank._authorize_signed(
+            client_id=self._auth(SCOPE_PAYMENTS_WRITE),
+            body=body,
+            headers=sign_request("POST", _AUTHORIZATIONS_PATH, body, agent, created=int(self._bank._now())),
+            idempotency_key=idempotency_key,
         )
 
     async def capture(self, authorization_id: str) -> Authorization:
@@ -679,6 +934,7 @@ class MockAIBankApi(AIBankApi):
     async def create_consent_request(
         self,
         *,
+        agent_id: str,
         purpose: str,
         currency: str = "USD",
         max_per_operation: int | None = None,
@@ -686,6 +942,7 @@ class MockAIBankApi(AIBankApi):
     ) -> ConsentRequest:
         return self._bank._create_consent_request(
             client_id=self._auth(SCOPE_PAYMENTS_WRITE),
+            agent_id=agent_id,
             purpose=purpose,
             currency=currency,
             max_per_operation=max_per_operation,

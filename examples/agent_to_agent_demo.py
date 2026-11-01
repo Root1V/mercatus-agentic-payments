@@ -175,8 +175,13 @@ async def _run_mandate_flow(protocol: AP2Protocol, catalog: InMemoryServiceRegis
     bank = protocol.aibank
     holders = protocol.aibank_holder_channel
     print()
+    # El permiso es para UN agente (contrato 1.1): el titular ve su nombre, y
+    # ningún otro agente de la plataforma puede usarlo.
+    identity = protocol.provision_aibank_agent("Agente de investigación (demo de Mercatus)")
     print("--- 1. Mercatus pide permiso (sin elegir cuenta: la elige el titular) ---")
+    print(f"agente:           {identity.agent_id} (firma con {identity.key_id})")
     request = await bank.create_consent_request(
+        agent_id=identity.agent_id,
         purpose=_MANDATE_PURPOSE,
         max_per_operation=usd_to_micros(options.max_per_operation),
         max_total=usd_to_micros(options.max_total),
@@ -223,7 +228,7 @@ async def _run_mandate_flow(protocol: AP2Protocol, catalog: InMemoryServiceRegis
 
     print()
     print("--- 3. El agente paga con el permiso, desde la cuenta del cliente ---")
-    credential = AIBankMandateCredential(mandate_id=mandate.mandate_id, account_id=request.account_id)
+    credential = AIBankMandateCredential(mandate_id=mandate.mandate_id, account_id=request.account_id, agent=identity)
     async with ResearchAgent(protocol=protocol, signer=credential, catalog=catalog) as agent:
         for number in range(1, options.payments + 1):
             label = f"pago {number}/{options.payments}:"

@@ -13,6 +13,7 @@ name = "agent-commerce"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "eth-account" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -56,6 +57,7 @@ requires-dist = [
     { name = "ap2", marker = "extra == 'ap2'", specifier = ">=0.1.1,<0.2" },
     { name = "bcrypt", marker = "extra == 'dashboard'", specifier = "<4.1" },
     { name = "circle-developer-controlled-wallets", marker = "extra == 'circle'", specifier = ">=9.6,<10" },
+    { name = "cryptography", specifier = ">=43" },
     { name = "eth-account", specifier = ">=0.13" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },

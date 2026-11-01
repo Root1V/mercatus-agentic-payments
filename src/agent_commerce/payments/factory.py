@@ -96,16 +96,19 @@ def build_payer_credential(
         from .aibank_credential import AIBankSubAccount
         from .protocols.ap2_protocol import AP2Protocol
 
-        account_id = (
-            settings.aibank_buyer_account_id if role == "buyer" else settings.aibank_seller_account_id
-        )
-        if account_id:
-            return AIBankSubAccount(account_id=account_id)
-        if not isinstance(protocol, AP2Protocol):
+        if role == "seller" and settings.aibank_seller_account_id:
+            # El vendedor solo cobra: su sub-cuenta no necesita agente.
+            return AIBankSubAccount(account_id=settings.aibank_seller_account_id)
+        if role == "buyer" and settings.aibank_buyer_account_id:
             raise ValueError(
-                "ap2_settlement=aibank sin AGENT_COMMERCE_AIBANK_"
-                f"{role.upper()}_ACCOUNT_ID necesita el `protocol` para abrir la sub-cuenta"
+                "AGENT_COMMERCE_AIBANK_BUYER_ACCOUNT_ID no se puede usar todavía: desde el contrato 1.1 cada "
+                "pago va firmado por el agente dueño de la cuenta, y las claves de los agentes aún no se "
+                "persisten. Dejalo vacío para que se abra una cuenta atada a un agente nuevo."
             )
-        return protocol.provision_aibank_account(f"agent_{role}_demo")
+        if not isinstance(protocol, AP2Protocol):
+            raise ValueError(f"ap2_settlement=aibank necesita el `protocol` para abrir la sub-cuenta del {role}")
+        if role == "buyer":
+            return protocol.provision_aibank_buyer(agent_name="Agente comprador de Mercatus (demo)")
+        return protocol.provision_aibank_account("agent_seller_demo")
 
     return build_wallet_signer(role=role, settings=settings, private_key=private_key)

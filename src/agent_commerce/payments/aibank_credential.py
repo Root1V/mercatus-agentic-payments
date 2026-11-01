@@ -13,16 +13,33 @@ autorizado y capturado. AIBank es un segundo riel de liquidación de
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .aibank_signing import AgentIdentity
+
+
+def new_intent_reference(prefix: str = "task") -> str:
+    """Una referencia de tarea nueva (`intent.reference`, AE-10)."""
+    return f"{prefix}-{uuid.uuid4().hex}"
 
 
 @dataclass(frozen=True)
 class AIBankSubAccount:
     """Modelo A (ómnibus): una sub-cuenta que la integración de Mercatus abrió
     para un agente (`POST /v1/accounts`, idempotente por `owner_reference`).
-    El dinero que hay ahí lo custodia Mercatus."""
+    El dinero que hay ahí lo custodia Mercatus.
+
+    Para PAGAR hace falta `agent`: desde la 1.1 cada pago va firmado por el
+    agente dueño de la cuenta (AE-10). Una sub-cuenta sin agente -- la de un
+    vendedor -- solo cobra. `intent_reference` es la tarea que el cliente le
+    dio al agente; los pagos de una misma tarea la comparten."""
 
     account_id: str
+    agent: AgentIdentity | None = field(default=None, repr=False)
+    intent_reference: str = field(default_factory=new_intent_reference)
 
     @property
     def address(self) -> str:
@@ -44,6 +61,9 @@ class AIBankMandateCredential:
 
     mandate_id: str
     account_id: str
+    # El agente al que el titular concedió el permiso (1.1): solo él paga con él.
+    agent: AgentIdentity | None = field(default=None, repr=False)
+    intent_reference: str = field(default_factory=new_intent_reference)
 
     @property
     def address(self) -> str:

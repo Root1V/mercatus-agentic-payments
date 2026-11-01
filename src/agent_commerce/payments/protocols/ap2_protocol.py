@@ -102,9 +102,10 @@ from x402.mechanisms.evm.types import ExactEIP3009Payload
 from x402.schemas.helpers import convert_to_token_amount, parse_money
 
 from agent_commerce.config import Settings, SettlementRail, get_settings
-from agent_commerce.payments.aibank_api import AIBankError, micros_to_usd, usd_to_micros
+from agent_commerce.payments.aibank_api import AIBankError, Intent, micros_to_usd, usd_to_micros
 from agent_commerce.payments.aibank_credential import AIBankMandateCredential, AIBankSubAccount
 from agent_commerce.payments.aibank_http import AIBankHttpApi, AIBankHttpHolderChannel
+from agent_commerce.payments.aibank_signing import AgentIdentity
 from agent_commerce.payments.facilitator_selection import build_facilitator_client
 from agent_commerce.payments.wallets.base import WalletSigner
 from agent_commerce.payments.wallets.local_eoa import LocalEoaSigner
@@ -179,6 +180,15 @@ def _aibank_method_data(*, pay_to: str, price_usd: str, network: str) -> Payment
         supported_methods=_AIBANK_METHOD_NAME,
         data={"payTo": pay_to, "price": price_usd, "network": network},
     )
+
+
+def _intent_description(cart_mandate: CartMandate) -> str:
+    """Qué se compró, para el historial del titular (`intent.description`,
+    AE-10): el comercio y el ítem del carrito -- nunca el contenido que
+    procesa el agente, que puede tener datos de terceros. Hasta 140 caracteres."""
+    contents = cart_mandate.contents
+    label = contents.payment_request.details.total.label
+    return f"{contents.merchant_name}: {label}"[:140]
 
 
 def _build_cart_mandate(
@@ -435,7 +445,9 @@ class _AP2BuyerClient(BuyerClient):
         if self._rail is SettlementRail.X402:
             details, user_authorization = self._pay_x402(pay_data)
         else:
-            details, user_authorization = await self._pay_aibank(pay_data, cart_id=cart_mandate.contents.id)
+            details, user_authorization = await self._pay_aibank(
+                pay_data, cart_id=cart_mandate.contents.id, description=_intent_description(cart_mandate)
+            )
 
         contents = PaymentMandateContents(
             payment_mandate_id=f"pm_{uuid.uuid4().hex}",
@@ -479,10 +491,17 @@ class _AP2BuyerClient(BuyerClient):
         # completo -- ver `_build_payment_mandate_header`.
         return {"x402Payload": payment_payload.model_dump(mode="json")}, ""
 
-    async def _pay_aibank(self, pay_data: dict[str, Any], *, cart_id: str) -> tuple[dict[str, Any], str]:
+    async def _pay_aibank(
+        self, pay_data: dict[str, Any], *, cart_id: str, description: str
+    ) -> tuple[dict[str, Any], str]:
         credential = self._credential
         assert isinstance(credential, (AIBankSubAccount, AIBankMandateCredential))
         assert self._bank is not None
+        if credential.agent is None:
+            raise AIBankError(
+                "agent_signature_invalid",
+                "esta cuenta no tiene un agente que firme: desde la 1.1 cada pago va firmado (AE-10)",
+            )
         amount = usd_to_micros(Decimal(parse_money(pay_data["price"])["amount"]))
 
         # Mismo contrato en los dos modelos (doc 13 §1): lo único que cambia es
@@ -495,6 +514,8 @@ class _AP2BuyerClient(BuyerClient):
             payee_account_id=pay_data["payTo"],
             amount=amount,
             idempotency_key=cart_id,
+            agent=credential.agent,
+            intent=Intent(reference=credential.intent_reference, description=description),
             mandate_id=credential.mandate_id if isinstance(credential, AIBankMandateCredential) else None,
         )
         await self._bank.capture(authorization.authorization_id)
@@ -616,15 +637,30 @@ class AP2Protocol(PaymentProtocol):
             )
         return self._holder_channel
 
-    def provision_aibank_account(self, owner_reference: str) -> AIBankSubAccount:
+    def provision_aibank_agent(self, name: str) -> AgentIdentity:
+        """Registra un agente en el banco con una clave Ed25519 nueva (AE-10).
+        `name` es el que ve el titular: tiene que reconocerlo. Síncrono, para
+        sembrar al arrancar. La clave vive solo en memoria por ahora (ver
+        `docs/roadmap.md`: persistirla cifrada es el paso siguiente)."""
+        if self._http_bank is not None:
+            return self._http_bank.register_agent_blocking(name=name)
+        assert self._mock_bank is not None
+        return self._mock_bank.provision_agent(client_id=_MOCK_AIBANK_CLIENT_ID, name=name)
+
+    def provision_aibank_account(
+        self, owner_reference: str, *, agent: AgentIdentity | None = None
+    ) -> AIBankSubAccount:
         """Abre (o reencuentra: es idempotente por `owner_reference`) una
         sub-cuenta de la integración, con saldo inicial solo en el sandbox
-        (en producción se rechaza). Síncrono porque se usa al arrancar (CLI,
-        dashboard), antes de que haya un event loop."""
+        (en producción se rechaza). Con `agent`, la cuenta queda atada a él y
+        puede pagar; sin él -- la de un vendedor -- solo cobra. Síncrono porque
+        se usa al arrancar (CLI, dashboard), antes de que haya un event loop."""
+        agent_id = agent.agent_id if agent else None
         if self._http_bank is not None:
             account = self._http_bank.open_account_blocking(
                 owner_reference=owner_reference,
                 initial_balance=_MOCK_AIBANK_INITIAL_BALANCE if self._settings.aibank_sandbox else None,
+                agent_id=agent_id,
             )
         else:
             assert self._mock_bank is not None
@@ -632,8 +668,17 @@ class AP2Protocol(PaymentProtocol):
                 client_id=_MOCK_AIBANK_CLIENT_ID,
                 owner_reference=owner_reference,
                 initial_balance=_MOCK_AIBANK_INITIAL_BALANCE,
+                agent_id=agent_id,
             )
-        return AIBankSubAccount(account_id=account.account_id)
+        return AIBankSubAccount(account_id=account.account_id, agent=agent)
+
+    def provision_aibank_buyer(self, *, agent_name: str) -> AIBankSubAccount:
+        """Un agente comprador listo para pagar en el modelo A: registrado, y
+        con su propia sub-cuenta atada a él. La cuenta se nombra por el agente
+        porque, sin claves persistidas todavía, cada arranque es un agente
+        nuevo -- y una cuenta ya atada a otro agente sería `account_agent_conflict`."""
+        agent = self.provision_aibank_agent(agent_name)
+        return self.provision_aibank_account(f"wallet-{agent.agent_id}", agent=agent)
 
     def mount_seller(
         self,

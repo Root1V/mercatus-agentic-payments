@@ -19,10 +19,9 @@ Lo que este módulo resuelve y el puerto no ve:
   respondió (AE-08, PR #12).
 
 La captura devuelve solo `{authorization_id, status, settled_at}`; para
-devolver una `Authorization` completa se consulta después con `GET`. Ojo con
-un caso fino (AE-08): un reintento de captura que recibe
-`authorization_not_capturable` sobre algo que el `GET` muestra `refunded` o
-`partially_refunded` significa que la captura original SÍ se hizo.
+devolver una `Authorization` completa se consulta después con `GET`. Capturar
+algo ya cobrado, aunque después se haya devuelto, es `200` con el mismo
+`settled_at` y el estado de hoy: un reintento confirma la captura (AE-14).
 """
 
 from __future__ import annotations
@@ -38,15 +37,20 @@ import httpx
 from .aibank_api import (
     LEGACY_CODE_RENAMES,
     Account,
+    Agent,
+    AgentKey,
     AIBankApi,
     AIBankError,
     Authorization,
     ConsentRequest,
     HolderChannel,
+    Intent,
     Mandate,
     Refund,
     TestHolder,
+    authorization_body,
 )
+from .aibank_signing import AgentIdentity, generate_agent_key, public_jwk, sign_request
 
 _TOKEN_REFRESH_MARGIN_SECONDS = 60
 _MAX_RETRY_AFTER_SECONDS = 30
@@ -63,11 +67,36 @@ def _required_dt(value: str) -> datetime:
     return parsed
 
 
-def _partner_account_id(value: Any) -> str:
+def _prefixed(value: Any, prefix: str) -> str:
     """La API de socio solo expone ids opacos con prefijo (AE-06)."""
-    if not isinstance(value, str) or not value.startswith("acc_"):
-        raise AIBankError("server_error", f"la API devolvió un account_id inesperado: {value!r}")
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise AIBankError("server_error", f"la API devolvió un id inesperado (se esperaba {prefix}…): {value!r}")
     return value
+
+
+def _partner_account_id(value: Any) -> str:
+    return _prefixed(value, "acc_")
+
+
+def _agent_key_from_json(data: dict[str, Any]) -> AgentKey:
+    return AgentKey(
+        key_id=_prefixed(data["key_id"], "key_"),
+        public_key=data["public_key"],
+        created_at=_required_dt(data["created_at"]),
+        expires_at=_parse_dt(data.get("expires_at")),
+        retired_at=_parse_dt(data.get("retired_at")),
+    )
+
+
+def _agent_from_json(data: dict[str, Any]) -> Agent:
+    return Agent(
+        agent_id=_prefixed(data["agent_id"], "agt_"),
+        name=data["name"],
+        status=data["status"],
+        keys=tuple(_agent_key_from_json(k) for k in data.get("keys", [])),
+        created_at=_required_dt(data["created_at"]),
+        revoked_at=_parse_dt(data.get("revoked_at")),
+    )
 
 
 def _error_from_response(response: httpx.Response) -> AIBankError:
@@ -186,18 +215,22 @@ class AIBankHttpApi(AIBankApi):
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        content: bytes | None = None,
+        sign_with: AgentIdentity | None = None,
     ) -> httpx.Response:
         refreshed = False
         attempt = 0
         while True:
             token = await self._access_token()
             http, _ = self._loop_state()
+            signature = sign_request(method, path, content or b"", sign_with) if sign_with else {}
             response = await http.request(
                 method,
                 f"{self._base_url}{path}",
                 json=json,
                 params=params,
-                headers={"Authorization": f"Bearer {token}", **(headers or {})},
+                content=content,
+                headers={"Authorization": f"Bearer {token}", **(headers or {}), **signature},
             )
             if response.status_code == 401 and not refreshed:
                 refreshed = True
@@ -214,31 +247,50 @@ class AIBankHttpApi(AIBankApi):
 
     # --- Cuentas ---------------------------------------------------------
 
+    def _post_blocking(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        with httpx.Client(timeout=_DEFAULT_TIMEOUT) as client:
+            token = self._remember_token(client.post(f"{self._base_url}/oauth/token", data=self._token_form()))
+            response = client.post(f"{self._base_url}{path}", json=body, headers={"Authorization": f"Bearer {token}"})
+        if not response.is_success:
+            raise _error_from_response(response)
+        data: dict[str, Any] = response.json()
+        return data
+
     def open_account_blocking(
-        self, *, owner_reference: str, currency: str = "USD", initial_balance: int | None = None
+        self,
+        *,
+        owner_reference: str,
+        currency: str = "USD",
+        initial_balance: int | None = None,
+        agent_id: str | None = None,
     ) -> Account:
         """`open_account` síncrono, para sembrar cuentas al arrancar (CLI,
         dashboard) antes de que haya un event loop. Idempotente igual."""
-        with httpx.Client(timeout=_DEFAULT_TIMEOUT) as client:
-            token = self._remember_token(client.post(f"{self._base_url}/oauth/token", data=self._token_form()))
-            response = client.post(
-                f"{self._base_url}/v1/accounts",
-                json=self._account_body(owner_reference, currency, None, initial_balance),
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        if not response.is_success:
-            raise _error_from_response(response)
-        return self._account_from(response.json())
+        body = self._account_body(owner_reference, currency, None, initial_balance, agent_id)
+        return self._account_from(self._post_blocking("/v1/accounts", body))
+
+    def register_agent_blocking(self, *, name: str) -> AgentIdentity:
+        """Registra un agente con una clave nueva, síncrono (para sembrar al
+        arrancar). La clave privada se genera acá y nunca sale de Mercatus."""
+        private_key = generate_agent_key()
+        agent = _agent_from_json(self._post_blocking("/v1/agents", {"name": name, "public_key": public_jwk(private_key)}))
+        return AgentIdentity(agent_id=agent.agent_id, key_id=agent.keys[0].key_id, private_key=private_key)
 
     @staticmethod
     def _account_body(
-        owner_reference: str, currency: str, display_name: str | None, initial_balance: int | None
+        owner_reference: str,
+        currency: str,
+        display_name: str | None,
+        initial_balance: int | None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"owner_reference": owner_reference, "currency": currency}
         if display_name is not None:
             body["display_name"] = display_name
         if initial_balance is not None:
             body["initial_balance"] = initial_balance
+        if agent_id is not None:
+            body["agent_id"] = agent_id
         return body
 
     @staticmethod
@@ -254,11 +306,33 @@ class AIBankHttpApi(AIBankApi):
         currency: str = "USD",
         display_name: str | None = None,
         initial_balance: int | None = None,
+        agent_id: str | None = None,
     ) -> Account:
         response = await self._request(
-            "POST", "/v1/accounts", json=self._account_body(owner_reference, currency, display_name, initial_balance)
+            "POST",
+            "/v1/accounts",
+            json=self._account_body(owner_reference, currency, display_name, initial_balance, agent_id),
         )
         return self._account_from(response.json())
+
+    # --- Agentes (contrato 1.1) ------------------------------------------
+
+    async def register_agent(self, *, name: str, public_key: dict[str, str]) -> Agent:
+        data = (await self._request("POST", "/v1/agents", json={"name": name, "public_key": public_key})).json()
+        return _agent_from_json(data)
+
+    async def get_agent(self, agent_id: str) -> Agent:
+        return _agent_from_json((await self._request("GET", f"/v1/agents/{agent_id}")).json())
+
+    async def revoke_agent(self, agent_id: str) -> None:
+        await self._request("DELETE", f"/v1/agents/{agent_id}")
+
+    async def add_agent_key(self, agent_id: str, *, public_key: dict[str, str]) -> AgentKey:
+        data = (await self._request("POST", f"/v1/agents/{agent_id}/keys", json={"public_key": public_key})).json()
+        return _agent_key_from_json(data)
+
+    async def retire_agent_key(self, agent_id: str, key_id: str) -> None:
+        await self._request("DELETE", f"/v1/agents/{agent_id}/keys/{key_id}")
 
     # --- Pagos -----------------------------------------------------------
 
@@ -269,22 +343,32 @@ class AIBankHttpApi(AIBankApi):
         payee_account_id: str,
         amount: int,
         idempotency_key: str,
+        agent: AgentIdentity,
+        intent: Intent,
         currency: str = "USD",
         mandate_id: str | None = None,
     ) -> Authorization:
         if not idempotency_key:
             # El banco lo rechaza igual (`400`); fallar antes ahorra la llamada.
             raise AIBankError("malformed_request", "falta el encabezado Idempotency-Key")
-        body: dict[str, Any] = {
-            "payer_account_id": payer_account_id,
-            "payee_account_id": payee_account_id,
-            "amount": amount,
-            "currency": currency,
-        }
-        if mandate_id is not None:
-            body["mandate_id"] = mandate_id
+        body = authorization_body(
+            payer_account_id=payer_account_id,
+            payee_account_id=payee_account_id,
+            amount=amount,
+            currency=currency,
+            mandate_id=mandate_id,
+            agent=agent,
+            intent=intent,
+        )
+        # La firma se recalcula en cada intento (también en los reintentos por
+        # 429/503): `created` vence a los 5 minutos y `Retry-After` puede ser
+        # largo. Los bytes del cuerpo -- y la Idempotency-Key -- no cambian.
         response = await self._request(
-            "POST", "/v1/authorizations", json=body, headers={"Idempotency-Key": idempotency_key}
+            "POST",
+            "/v1/authorizations",
+            content=body,
+            headers={"Idempotency-Key": idempotency_key, "Content-Type": "application/json"},
+            sign_with=agent,
         )
         data = response.json()
         return Authorization(
@@ -347,12 +431,13 @@ class AIBankHttpApi(AIBankApi):
     async def create_consent_request(
         self,
         *,
+        agent_id: str,
         purpose: str,
         currency: str = "USD",
         max_per_operation: int | None = None,
         max_total: int | None = None,
     ) -> ConsentRequest:
-        body: dict[str, Any] = {"currency": currency, "purpose": purpose}
+        body: dict[str, Any] = {"agent_id": agent_id, "currency": currency, "purpose": purpose}
         if max_per_operation is not None:
             body["max_per_operation"] = max_per_operation
         if max_total is not None:
@@ -372,6 +457,7 @@ class AIBankHttpApi(AIBankApi):
             expires_at=_required_dt(data["expires_at"]),
             mandate_id=data.get("mandate_id"),
             account_id=_partner_account_id(account_id) if account_id else None,
+            agent_id=data.get("agent_id"),
         )
 
     async def get_mandate(self, mandate_id: str) -> Mandate:
