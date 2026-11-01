@@ -108,7 +108,7 @@ async def test_reusing_the_same_cart_mandate_twice_is_rejected() -> None:
         from agent_commerce.payments.protocols.ap2_protocol import _AP2_PAYMENT_MANDATE_HEADER
 
         cart_mandate = CartMandate.model_validate(cart_response.json()["cartMandate"])
-        header_value = buyer_client._build_payment_mandate_header(cart_mandate)
+        header_value = await buyer_client._build_payment_mandate_header(cart_mandate)
 
         first = await buyer_client._http.post(
             f"http://127.0.0.1:{port}/echo",

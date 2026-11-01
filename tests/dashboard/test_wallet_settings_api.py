@@ -279,8 +279,8 @@ def test_test_call_receipt_reports_local_backend_by_default(dashboard_client: Te
 
 
 def test_put_wallet_settings_aibank_needs_no_fields(dashboard_client: TestClient) -> None:
-    """A diferencia de Circle, AIBank no exige nada la primera vez -- se
-    genera una cuenta efímera al vuelo si se deja vacío."""
+    """A diferencia de Circle, AIBank no exige nada la primera vez: sin
+    sub-cuenta, el comprador usa una que el dashboard abre solo en el banco."""
     headers = _auth_headers(dashboard_client)
     response = dashboard_client.put(
         "/api/admin/wallet-settings", json={"backend": "aibank"}, headers=headers
@@ -289,21 +289,8 @@ def test_put_wallet_settings_aibank_needs_no_fields(dashboard_client: TestClient
     body = response.json()
     assert body["backend"] == "aibank"
     assert body["aibank_account_id"] is None
-    assert body["has_aibank_api_key"] is False
-
-
-def test_put_wallet_settings_aibank_never_returns_api_key(dashboard_client: TestClient) -> None:
-    headers = _auth_headers(dashboard_client)
-    response = dashboard_client.put(
-        "/api/admin/wallet-settings",
-        json={"backend": "aibank", "aibank_account_id": "cuenta-1", "aibank_api_key": "sk-secreta"},
-        headers=headers,
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert "aibank_api_key" not in body
-    assert body["aibank_account_id"] == "cuenta-1"
-    assert body["has_aibank_api_key"] is True
+    # No hay API key por cuenta en la API real (AE-02): ni se guarda ni se informa.
+    assert "has_aibank_api_key" not in body
 
 
 def test_test_call_with_aibank_backend_fails_clearly_on_x402(dashboard_client: TestClient) -> None:
@@ -341,11 +328,8 @@ def test_test_call_pays_with_aibank_backed_buyer(dashboard_client: TestClient) -
     sobre el mismo `dashboard_client` por defecto, sin ninguna instancia
     especial."""
     headers = _auth_headers(dashboard_client)
-    dashboard_client.put(
-        "/api/admin/wallet-settings",
-        json={"backend": "aibank", "aibank_account_id": "comprador-1"},
-        headers=headers,
-    )
+    dashboard_client.put("/api/admin/wallet-settings", json={"backend": "aibank"}, headers=headers)
+    buyer = next(p for p in dashboard_client.get("/api/protocols", headers=headers).json() if p["name"] == "ap2")
 
     response = dashboard_client.post(
         "/api/test-call",
@@ -354,12 +338,31 @@ def test_test_call_pays_with_aibank_backed_buyer(dashboard_client: TestClient) -
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["receipt"]["payer"] == "comprador-1"
+    assert body["receipt"]["payer"] == buyer["buyer_address"]
+    assert body["receipt"]["payer"].startswith("acc_")
     assert body["receipt"]["network"] == "aibank:mock"
     assert body["receipt"]["wallet_backend"] == "aibank"
 
     ledger = dashboard_client.get("/api/ledger", headers=headers).json()
-    assert ledger[0]["payer"] == "comprador-1"
+    assert ledger[0]["payer"] == buyer["buyer_address"]
+
+
+def test_test_call_with_an_account_the_bank_never_opened_fails_clearly(dashboard_client: TestClient) -> None:
+    """Una sub-cuenta inventada no "se abre sola" como en el mock anterior: el
+    banco real responde `account_not_found`, y el dashboard lo muestra."""
+    headers = _auth_headers(dashboard_client)
+    dashboard_client.put(
+        "/api/admin/wallet-settings",
+        json={"backend": "aibank", "aibank_account_id": "acc_" + "0" * 32},
+        headers=headers,
+    )
+    response = dashboard_client.post(
+        "/api/test-call",
+        json={"protocol": "ap2", "text": "Frase uno. Frase dos.", "max_sentences": 1},
+        headers=headers,
+    )
+    assert response.status_code == 502
+    assert "account_not_found" in response.json()["detail"]
 
 
 def test_switching_between_x402_and_aibank_live_without_restart(dashboard_client: TestClient) -> None:
@@ -377,11 +380,7 @@ def test_switching_between_x402_and_aibank_live_without_restart(dashboard_client
     assert first.status_code == 200
     assert first.json()["receipt"]["network"] == "eip155:84532"
 
-    dashboard_client.put(
-        "/api/admin/wallet-settings",
-        json={"backend": "aibank", "aibank_account_id": "comprador-aibank"},
-        headers=headers,
-    )
+    dashboard_client.put("/api/admin/wallet-settings", json={"backend": "aibank"}, headers=headers)
     second = dashboard_client.post(
         "/api/test-call",
         json={"protocol": "ap2", "text": "Frase uno. Frase dos.", "max_sentences": 1},
@@ -389,7 +388,7 @@ def test_switching_between_x402_and_aibank_live_without_restart(dashboard_client
     )
     assert second.status_code == 200
     assert second.json()["receipt"]["network"] == "aibank:mock"
-    assert second.json()["receipt"]["payer"] == "comprador-aibank"
+    assert second.json()["receipt"]["payer"].startswith("acc_")
 
     dashboard_client.put("/api/admin/wallet-settings", json={"backend": "local"}, headers=headers)
     third = dashboard_client.post(

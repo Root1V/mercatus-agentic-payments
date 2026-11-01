@@ -9,7 +9,7 @@ de AP2 (`Settings.ap2_settlement`), resuelto adentro de `AP2Protocol` --
 ver `protocols/ap2_protocol.py` y `docs/roadmap.md` RM-18. Por eso
 `build_payer_credential` (no `build_wallet_signer`) es el punto de entrada
 correcto para cualquier código nuevo que no sepa de antemano si el
-comprador va a necesitar un `WalletSigner` o una `AIBankCredential`.
+comprador va a necesitar un `WalletSigner` o una `AIBankSubAccount`.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from .protocols.base import PaymentProtocol
 from .wallets.base import WalletSigner
 
 if TYPE_CHECKING:
-    from .aibank_credential import AIBankCredential
+    from .aibank_credential import AIBankSubAccount
 
 
 def get_payment_protocol(settings: Settings | None = None) -> PaymentProtocol:
@@ -73,25 +73,39 @@ def build_wallet_signer(
 
 
 def build_payer_credential(
-    *, role: str, settings: Settings | None = None, private_key: str | None = None
-) -> WalletSigner | AIBankCredential:
+    *,
+    role: str,
+    settings: Settings | None = None,
+    private_key: str | None = None,
+    protocol: PaymentProtocol | None = None,
+) -> WalletSigner | AIBankSubAccount:
     """Punto de composición único para "con qué paga este rol" (RM-18): si
-    el protocolo activo es AP2 con `ap2_settlement=aibank`, arma una
-    `AIBankCredential` desde `Settings`; para cualquier otra combinación
-    delega en `build_wallet_signer` sin cambios. Preferí esto a
-    `build_wallet_signer` en código nuevo que no sepa de antemano qué
-    riel de liquidación está activo."""
+    el protocolo activo es AP2 con `ap2_settlement=aibank`, devuelve la
+    sub-cuenta de AIBank del rol; para cualquier otra combinación delega en
+    `build_wallet_signer` sin cambios. Preferí esto a `build_wallet_signer`
+    en código nuevo que no sepa de antemano qué riel de liquidación está
+    activo.
+
+    La sub-cuenta es la de `Settings` si está configurada; si no, se abre
+    en el banco de `protocol` (idempotente por `owner_reference`, así que
+    dos llamadas devuelven la misma). No se inventa un id: en la API real
+    una cuenta que el banco no abrió da `account_not_found`."""
     settings = settings or get_settings()
 
     if settings.protocol is Protocol.AP2 and settings.ap2_settlement is SettlementRail.AIBANK:
-        from .aibank_credential import AIBankCredential
+        from .aibank_credential import AIBankSubAccount
+        from .protocols.ap2_protocol import AP2Protocol
 
         account_id = (
             settings.aibank_buyer_account_id if role == "buyer" else settings.aibank_seller_account_id
         )
-        api_key = settings.aibank_buyer_api_key if role == "buyer" else settings.aibank_seller_api_key
-        return AIBankCredential(
-            account_id=account_id, api_key=api_key.get_secret_value() if api_key else None
-        )
+        if account_id:
+            return AIBankSubAccount(account_id=account_id)
+        if not isinstance(protocol, AP2Protocol):
+            raise ValueError(
+                "ap2_settlement=aibank sin AGENT_COMMERCE_AIBANK_"
+                f"{role.upper()}_ACCOUNT_ID necesita el `protocol` para abrir la sub-cuenta"
+            )
+        return protocol.provision_aibank_account(f"agent_{role}_demo")
 
     return build_wallet_signer(role=role, settings=settings, private_key=private_key)

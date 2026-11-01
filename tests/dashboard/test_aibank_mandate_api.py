@@ -21,8 +21,6 @@ from agent_commerce.db import models  # noqa: F401 -- registra las tablas en Bas
 from agent_commerce.db.base import Base
 from agent_commerce.db.session import get_db
 
-_TITULAR_ACCOUNT_ID = "acc_3f9e8d7c"
-
 
 @pytest.fixture(autouse=True)
 def _jwt_test_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -75,11 +73,13 @@ def _request_consent(client: TestClient, **overrides: str) -> dict:
 
 
 def _connect_account(client: TestClient, **approval: str) -> dict:
-    """Flujo completo hasta dejar el mandato activo como credencial."""
+    """Flujo completo hasta dejar el mandato activo como credencial. La cuenta
+    del titular no se conoce de antemano: la abre el simulador y Mercatus la
+    aprende al activar (`aibank_mandate_account_id`)."""
     request = _request_consent(client)
     approve = client.post(
         f"/api/admin/aibank/consent-requests/{request['consent_request_id']}/simulate-approval",
-        json={"account_id": _TITULAR_ACCOUNT_ID, **approval},
+        json=approval,
     )
     assert approve.status_code == 200, approve.text
     activate = client.post(f"/api/admin/aibank/consent-requests/{request['consent_request_id']}/activate")
@@ -134,10 +134,10 @@ def test_titular_cannot_raise_requested_limits(client: TestClient) -> None:
     request = _request_consent(client, max_total_usd="0.05")
     response = client.post(
         f"/api/admin/aibank/consent-requests/{request['consent_request_id']}/simulate-approval",
-        json={"account_id": _TITULAR_ACCOUNT_ID, "max_total_usd": "1"},
+        json={"max_total_usd": "1"},
     )
-    assert response.status_code == 400
-    assert response.json()["detail"] == "cannot_raise_requested_limits"
+    assert response.status_code == 422
+    assert response.json()["detail"] == "limit_above_requested"
 
 
 def test_rejected_consent_request_never_produces_a_mandate(client: TestClient) -> None:
@@ -148,8 +148,7 @@ def test_rejected_consent_request_never_produces_a_mandate(client: TestClient) -
 
     assert client.post(f"/api/admin/aibank/consent-requests/{consent_request_id}/activate").status_code == 409
     second_decision = client.post(
-        f"/api/admin/aibank/consent-requests/{consent_request_id}/simulate-approval",
-        json={"account_id": _TITULAR_ACCOUNT_ID},
+        f"/api/admin/aibank/consent-requests/{consent_request_id}/simulate-approval", json={}
     )
     assert second_decision.status_code == 409
 
@@ -158,7 +157,7 @@ def test_activating_switches_the_buyer_to_aibank_model_b(client: TestClient) -> 
     settings = _connect_account(client)
     assert settings["backend"] == "aibank"
     assert settings["aibank_model"] == "mandate"
-    assert settings["aibank_mandate_account_id"] == _TITULAR_ACCOUNT_ID
+    assert settings["aibank_mandate_account_id"].startswith("acc_")
 
     mandate = client.get("/api/admin/aibank/mandate").json()
     assert mandate["configured"] and mandate["found"]
@@ -173,13 +172,13 @@ def test_titular_granting_less_than_requested_is_reflected_in_the_mandate(client
 
 
 def test_test_call_pays_over_the_customers_own_account(client: TestClient) -> None:
-    _connect_account(client)
+    titular_account_id = _connect_account(client)["aibank_mandate_account_id"]
 
     response = _pay_with_ap2(client)
     assert response.status_code == 200, response.text
     receipt = response.json()["receipt"]
     assert receipt["network"] == "aibank:mock"
-    assert receipt["payer"] == _TITULAR_ACCOUNT_ID
+    assert receipt["payer"] == titular_account_id
     assert receipt["wallet_backend"] == "aibank_mandate"
 
     mandate = client.get("/api/admin/aibank/mandate").json()
@@ -217,7 +216,7 @@ def test_model_b_without_a_connected_account_fails_clearly(client: TestClient) -
 def test_switching_back_to_omnibus_keeps_the_mandate_for_later(client: TestClient) -> None:
     """Volver al modelo A no pierde el mandato: se puede retomar el B sin
     pedirle permiso de nuevo al titular."""
-    _connect_account(client)
+    titular_account_id = _connect_account(client)["aibank_mandate_account_id"]
 
     omnibus = client.put(
         "/api/admin/wallet-settings", json={"backend": "aibank", "aibank_model": "omnibus"}
@@ -226,10 +225,10 @@ def test_switching_back_to_omnibus_keeps_the_mandate_for_later(client: TestClien
     assert omnibus["aibank_mandate_id"] is not None
     paid_omnibus = _pay_with_ap2(client).json()["receipt"]
     assert paid_omnibus["wallet_backend"] == "aibank"
-    assert paid_omnibus["payer"] != _TITULAR_ACCOUNT_ID
+    assert paid_omnibus["payer"] != titular_account_id
 
     client.put("/api/admin/wallet-settings", json={"backend": "aibank", "aibank_model": "mandate"})
-    assert _pay_with_ap2(client).json()["receipt"]["payer"] == _TITULAR_ACCOUNT_ID
+    assert _pay_with_ap2(client).json()["receipt"]["payer"] == titular_account_id
 
 
 def test_rejects_unknown_aibank_model(client: TestClient) -> None:

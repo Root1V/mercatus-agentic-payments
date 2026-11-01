@@ -1,38 +1,28 @@
-"""Puertos de credencial AIBank: cómo se autentica el agente ante su banco
-(RM-18), en los dos modelos que especifica `13-spec-modelos-a-y-b.md`.
+"""Con qué cuenta de AIBank (hoy Aerarium) paga un rol, en los dos modelos
+de `13-spec-modelos-a-y-b.md` (RM-18).
 
-A diferencia de `WalletSigner` (`payments/wallets/base.py`), acá no hay
-custodio criptográfico ni firma: la prueba de pago es haber autenticado con
-éxito contra el banco (autorizar + capturar una transferencia), no una firma
-EIP-712/EIP-191. Por eso ninguna de estas credenciales implementa
-`WalletSigner` -- forzarlas en ese molde sería una abstracción falsa (ver
-`docs/roadmap.md` RM-18). AIBank es un segundo riel de liquidación de
-`AP2Protocol` (`payments/protocols/ap2_protocol.py`), no un `PaymentProtocol`
-aparte: AP2 ya está diseñado para ser agnóstico al riel real de pago.
+Ninguna de las dos lleva un secreto: en la API real quien se autentica es la
+**integración** (Mercatus, un token OAuth2 `client_credentials`), que actúa
+en nombre de sus agentes -- ver `aibank_api.py`. Un agente es solo una
+`account_id`, y lo que lo limita son los topes de su cuenta (AE-02). Por eso
+tampoco implementan `WalletSigner` (`payments/wallets/base.py`): no hay
+custodio criptográfico ni firma; la prueba de pago es que el banco haya
+autorizado y capturado. AIBank es un segundo riel de liquidación de
+`AP2Protocol`, no un `PaymentProtocol` aparte.
 """
 
 from __future__ import annotations
 
-import secrets
-import uuid
 from dataclasses import dataclass
 
 
-class AIBankCredential:
-    """Modelo A (ómnibus): cuenta + API key de un agente bajo el paraguas
-    de Mercatus en AIBank (o cualquier banco que implemente el mismo
-    contrato REST -- ver `docs/roadmap.md` RM-18).
+@dataclass(frozen=True)
+class AIBankSubAccount:
+    """Modelo A (ómnibus): una sub-cuenta que la integración de Mercatus abrió
+    para un agente (`POST /v1/accounts`, idempotente por `owner_reference`).
+    El dinero que hay ahí lo custodia Mercatus."""
 
-    En modo mock, si no se pasan `account_id`/`api_key`, se generan
-    efímeros al vuelo -- mismo criterio que `LocalEoaSigner` sin
-    `private_key`: no hace falta "abrir cuenta" en ningún lado antes de
-    poder pagar. `MockAIBank` "abre" la cuenta la primera vez que la ve
-    (ver `payments/mock_aibank.py`).
-    """
-
-    def __init__(self, account_id: str | None = None, api_key: str | None = None) -> None:
-        self.account_id = account_id or f"aibank_{uuid.uuid4().hex[:16]}"
-        self.api_key = api_key or f"sk_aibank_{secrets.token_hex(24)}"
+    account_id: str
 
     @property
     def address(self) -> str:
@@ -43,21 +33,14 @@ class AIBankCredential:
         return self.account_id
 
 
-@dataclass
+@dataclass(frozen=True)
 class AIBankMandateCredential:
-    """Modelo B (cuenta propia): la autoridad para pagar no la da una API
-    key que el agente posea -- la da un **mandato** que un titular real de
-    AIBank ya aprobó fuera de este framework, en la app del banco
-    (`13-spec-modelos-a-y-b.md` §3.2). Por eso esta credencial NO tiene
-    secreto propio, solo referencia un permiso ya otorgado: `mandate_id`
-    (de `MockAIBank.request_consent` + aprobación) y la `account_id` del
-    titular que lo concedió.
+    """Modelo B (cuenta propia): la cuenta es de un cliente del banco, y la
+    autoridad para sacar dinero de ella la da un **mandato** que su titular
+    aprobó en la app del banco (doc 13 §3.2) -- no algo que Mercatus posea.
 
-    No hereda de `AIBankCredential` a propósito -- conceptualmente no es
-    "una cuenta con su clave", es "un permiso ya concedido por otra
-    persona"; mezclarlas en una sola clase escondería esa diferencia real
-    detrás de campos opcionales sin sentido en un lado o el otro.
-    """
+    No hereda de `AIBankSubAccount` a propósito: no es "una cuenta nuestra",
+    es "un permiso que otra persona concedió sobre la suya"."""
 
     mandate_id: str
     account_id: str

@@ -23,7 +23,6 @@ class InMemoryWalletSettingsStore:
         circle_entity_secret: str | None,
         circle_wallet_id: str | None,
         aibank_account_id: str | None,
-        aibank_api_key: str | None,
         aibank_model: str | None = None,
     ) -> WalletSettings:
         if backend == "circle":
@@ -38,8 +37,6 @@ class InMemoryWalletSettingsStore:
             circle_api_key = self._settings.circle_api_key
         if circle_entity_secret is None and self._settings is not None:
             circle_entity_secret = self._settings.circle_entity_secret
-        if aibank_api_key is None and self._settings is not None:
-            aibank_api_key = self._settings.aibank_api_key
         if aibank_model is None and self._settings is not None:
             aibank_model = self._settings.aibank_model
 
@@ -49,7 +46,6 @@ class InMemoryWalletSettingsStore:
             circle_entity_secret=circle_entity_secret,
             circle_wallet_id=circle_wallet_id,
             aibank_account_id=aibank_account_id,
-            aibank_api_key=aibank_api_key,
             updated_at=datetime.now(UTC),
             aibank_model=aibank_model,
             aibank_mandate_id=self._settings.aibank_mandate_id if self._settings else None,
@@ -64,7 +60,6 @@ class InMemoryWalletSettingsStore:
             circle_entity_secret=None,
             circle_wallet_id=None,
             aibank_account_id=None,
-            aibank_api_key=None,
             updated_at=datetime.now(UTC),
         )
         self._settings = replace(

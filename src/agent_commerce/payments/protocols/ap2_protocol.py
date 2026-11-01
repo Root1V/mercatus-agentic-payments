@@ -9,13 +9,13 @@ pydantic reales del paquete `ap2` (que reflejan 1:1 los tipos oficiales de
 `google-agentic-commerce/AP2`) para esos mandatos.
 
 **Riel de liquidación (RM-18)**: AP2 está diseñado a propósito para ser
-agnóstico al riel real de pago -- por eso acá `AIBankCredential`/
-`MockAIBank` (banco propio, RM-18) se conectan como un **segundo riel de
+agnóstico al riel real de pago -- por eso acá AIBank (banco propio, RM-18,
+hoy Aerarium; puerto `AIBankApi`) se conecta como un **segundo riel de
 liquidación de AP2**, no como un protocolo aparte. El riel x402 liquida
 delegando en el mismo motor x402 que usa `X402Protocol` (tal como en el
 mundo real la extensión oficial `a2a-x402` de Google usa x402 como riel de
 liquidación dentro de un mandato AP2); el riel AIBank liquida autorizando +
-capturando contra `MockAIBank` en vez de firmar una transferencia on-chain.
+capturando contra el banco en vez de firmar una transferencia on-chain.
 Pedirle a un banco que "hable x402" directamente no tiene sentido: lo
 obligaría a custodiar cripto y firmar EIP-712 como una wallet -- en ese
 punto ya sería Circle (RM-06), no un banco propio.
@@ -39,12 +39,14 @@ comerciante" no depende de cómo se cobra. La firma del `PaymentMandate`
 con x402 es una firma EIP-191 real sobre el contenido exacto del mandato;
 con AIBank no existe firma en ese modelo (ver `aibank_credential.py`), así
 que la garantía de no-repudio la da haber autorizado+capturado con éxito
-contra el banco (el vendedor lo verifica de vuelta contra `MockAIBank` en
-`redeem`, igual que con x402 verifica contra el facilitator) -- una
+contra el banco (el vendedor lo verifica de vuelta contra el banco en
+`redeem` con `expected_amount`/`expected_payee_account_id`, igual que con x402
+verifica contra el facilitator) -- una
 simplificación real y documentada, no un descuido: no hay firma que ate esa
 autorización bancaria al contenido exacto de ESE mandato en particular,
 solo que el `authorization_id` sea de un solo uso y que pay_to/amount
-coincidan con lo que el banco realmente registró.
+coincidan con lo que el banco realmente registró. La `Idempotency-Key` de la
+autorización es el `cart_id`, que ya es de un solo uso (doc 11, OpenAPI).
 
 Otras simplificaciones deliberadas de esta implementación de referencia (ver
 `docs/roadmap.md` RM-02 y `docs/business_model_analysis.md`):
@@ -100,7 +102,9 @@ from x402.mechanisms.evm.types import ExactEIP3009Payload
 from x402.schemas.helpers import convert_to_token_amount, parse_money
 
 from agent_commerce.config import Settings, SettlementRail, get_settings
-from agent_commerce.payments.aibank_credential import AIBankCredential, AIBankMandateCredential
+from agent_commerce.payments.aibank_api import AIBankError, micros_to_usd, usd_to_micros
+from agent_commerce.payments.aibank_credential import AIBankMandateCredential, AIBankSubAccount
+from agent_commerce.payments.aibank_http import AIBankHttpApi, AIBankHttpHolderChannel
 from agent_commerce.payments.facilitator_selection import build_facilitator_client
 from agent_commerce.payments.wallets.base import WalletSigner
 from agent_commerce.payments.wallets.local_eoa import LocalEoaSigner
@@ -110,6 +114,7 @@ from .base import BuyerClient, PaidResponse, PaymentProtocol, PaymentReceipt
 if TYPE_CHECKING:
     from fastapi import FastAPI, Request
 
+    from agent_commerce.payments.aibank_api import AIBankApi, HolderChannel
     from agent_commerce.payments.mock_aibank import MockAIBank
     from agent_commerce.payments.protocols.base import PayerCredential
 
@@ -117,9 +122,11 @@ _AP2_PAYMENT_MANDATE_HEADER = "X-AP2-PAYMENT-MANDATE"
 _AP2_SETTLEMENT_HEADER = "X-AP2-SETTLEMENT"
 _X402_METHOD_NAME = "https://agent-commerce.dev/pay/x402-usdc"
 _AIBANK_METHOD_NAME = "https://agent-commerce.dev/pay/aibank-transfer"
-_AIBANK_NETWORK = "aibank:mock"
 _CART_TTL_SECONDS = 900
 _USDC_ATOMIC_UNITS = Decimal(10**6)
+_MOCK_AIBANK_CLIENT_ID = "mercatus_mock"
+# Saldo de sandbox de cada sub-cuenta que se abre sola: $1.000, en micras.
+_MOCK_AIBANK_INITIAL_BALANCE = 1_000 * 1_000_000
 
 
 class AP2Error(Exception):
@@ -167,10 +174,10 @@ def _x402_method_data(requirements: PaymentRequirements) -> PaymentMethodData:
     )
 
 
-def _aibank_method_data(*, pay_to: str, price_usd: str) -> PaymentMethodData:
+def _aibank_method_data(*, pay_to: str, price_usd: str, network: str) -> PaymentMethodData:
     return PaymentMethodData(
         supported_methods=_AIBANK_METHOD_NAME,
-        data={"payTo": pay_to, "price": price_usd, "network": _AIBANK_NETWORK},
+        data={"payTo": pay_to, "price": price_usd, "network": network},
     )
 
 
@@ -210,6 +217,7 @@ class _PendingCart:
     amount: Decimal
     expires_at: float
     x402_requirements: PaymentRequirements | None = None  # solo rail=x402
+    amount_micros: int | None = None  # solo rail=aibank
 
 
 class _AP2SellerState:
@@ -224,7 +232,8 @@ class _AP2SellerState:
         rail_resolver: Callable[[], SettlementRail],
         aibank_pay_to: str | None = None,
         facilitator: Any = None,
-        bank: MockAIBank | None = None,
+        bank: AIBankApi | None = None,
+        aibank_network: str = "aibank:mock",
     ) -> None:
         self._network = network
         self._pay_to = pay_to
@@ -235,6 +244,7 @@ class _AP2SellerState:
         self._rail_resolver = rail_resolver
         self._facilitator = facilitator
         self._bank = bank
+        self._aibank_network = aibank_network
         self._pending_carts: dict[str, _PendingCart] = {}
         self._used_cart_ids: set[str] = set()
 
@@ -267,12 +277,13 @@ class _AP2SellerState:
             )
         else:
             assert self._aibank_pay_to is not None
-            method_data = _aibank_method_data(pay_to=self._aibank_pay_to, price_usd=price)
+            method_data = _aibank_method_data(pay_to=self._aibank_pay_to, price_usd=price, network=self._aibank_network)
             pending = _PendingCart(
                 rail=rail,
                 pay_to=self._aibank_pay_to,
                 amount=amount,
                 expires_at=time.time() + _CART_TTL_SECONDS,
+                amount_micros=usd_to_micros(amount),
             )
 
         cart_mandate = _build_cart_mandate(
@@ -310,7 +321,7 @@ class _AP2SellerState:
                 contents=contents, pending=pending, user_authorization=payment_mandate.user_authorization
             )
         else:
-            settle = self._redeem_aibank(contents=contents, pending=pending)
+            settle = await self._redeem_aibank(contents=contents, pending=pending)
 
         self._used_cart_ids.add(cart_id)
         return settle, contents.payment_mandate_id
@@ -357,28 +368,32 @@ class _AP2SellerState:
             "transaction": settle_response.transaction,
         }
 
-    def _redeem_aibank(self, *, contents: Any, pending: _PendingCart) -> dict[str, Any]:
+    async def _redeem_aibank(self, *, contents: Any, pending: _PendingCart) -> dict[str, Any]:
         aibank_payload = (contents.payment_response.details or {}).get("aibankPayload")
         if not aibank_payload:
             raise AP2Error("missing_aibank_payload")
 
+        # La verificación independiente del vendedor (`GET` con `expected_*`):
+        # el banco compara monto y receptor, así que un mismatch llega como
+        # su código, no como una comparación nuestra.
         assert self._bank is not None
-        authorization = self._bank.get(aibank_payload.get("authorization_id"))
-        if authorization is None:
-            raise AP2Error("aibank_authorization_not_found")
+        try:
+            authorization = await self._bank.get_authorization(
+                aibank_payload.get("authorization_id", ""),
+                expected_amount=pending.amount_micros,
+                expected_payee_account_id=pending.pay_to,
+            )
+        except AIBankError as exc:
+            raise AP2Error(f"aibank_{exc.code}") from exc
         if authorization.status != "captured":
             raise AP2Error(f"aibank_authorization_not_captured_status_{authorization.status}")
-        if authorization.pay_to_account_id != pending.pay_to:
-            raise AP2Error("aibank_recipient_mismatch")
-        if authorization.amount != pending.amount:
-            raise AP2Error("aibank_amount_mismatch")
 
         return {
             "payer": authorization.payer_account_id,
             "pay_to": pending.pay_to,
-            "network": _AIBANK_NETWORK,
-            "amount": str(authorization.amount),
-            "transaction": authorization.id,
+            "network": self._aibank_network,
+            "amount": str(micros_to_usd(authorization.amount)),
+            "transaction": authorization.authorization_id,
         }
 
 
@@ -388,7 +403,7 @@ class _AP2BuyerClient(BuyerClient):
     _credential: PayerCredential
     _rail: SettlementRail
     _scheme: ExactEvmClientScheme | None = None  # solo rail=x402
-    _bank: MockAIBank | None = None  # solo rail=aibank
+    _bank: AIBankApi | None = None  # solo rail=aibank
 
     async def request(
         self, method: str, url: str, *, json: dict[str, Any] | None = None
@@ -402,7 +417,7 @@ class _AP2BuyerClient(BuyerClient):
             )
 
         cart_mandate = CartMandate.model_validate(response.json()["cartMandate"])
-        header_value = self._build_payment_mandate_header(cart_mandate)
+        header_value = await self._build_payment_mandate_header(cart_mandate)
 
         paid_response = await self._http.request(
             method, url, json=json, headers={_AP2_PAYMENT_MANDATE_HEADER: header_value}
@@ -413,14 +428,14 @@ class _AP2BuyerClient(BuyerClient):
             receipt=_receipt_from_headers(paid_response.headers),
         )
 
-    def _build_payment_mandate_header(self, cart_mandate: CartMandate) -> str:
+    async def _build_payment_mandate_header(self, cart_mandate: CartMandate) -> str:
         method_data = cart_mandate.contents.payment_request.method_data[0]
         pay_data = method_data.data or {}
 
         if self._rail is SettlementRail.X402:
             details, user_authorization = self._pay_x402(pay_data)
         else:
-            details, user_authorization = self._pay_aibank(pay_data)
+            details, user_authorization = await self._pay_aibank(pay_data, cart_id=cart_mandate.contents.id)
 
         contents = PaymentMandateContents(
             payment_mandate_id=f"pm_{uuid.uuid4().hex}",
@@ -464,36 +479,31 @@ class _AP2BuyerClient(BuyerClient):
         # completo -- ver `_build_payment_mandate_header`.
         return {"x402Payload": payment_payload.model_dump(mode="json")}, ""
 
-    def _pay_aibank(self, pay_data: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    async def _pay_aibank(self, pay_data: dict[str, Any], *, cart_id: str) -> tuple[dict[str, Any], str]:
         credential = self._credential
+        assert isinstance(credential, (AIBankSubAccount, AIBankMandateCredential))
         assert self._bank is not None
-        amount = Decimal(parse_money(pay_data["price"])["amount"])
+        amount = usd_to_micros(Decimal(parse_money(pay_data["price"])["amount"]))
 
-        if isinstance(credential, AIBankMandateCredential):
-            # Modelo B (`13-spec-modelos-a-y-b.md` §3.3): la autoridad la da
-            # el mandato, no una API key por cuenta -- ver docstring de
-            # `AIBankMandateCredential`. El mandato ya tiene que existir
-            # (pedido + aprobado por el titular fuera de este flujo de pago).
-            authorization = self._bank.authorize_with_mandate(
-                mandate_id=credential.mandate_id,
-                payer_account_id=credential.account_id,
-                pay_to_account_id=pay_data["payTo"],
-                amount=amount,
-                idempotency_key=uuid.uuid4().hex,
-            )
-            self._bank.capture(authorization_id=authorization.id, payer_account_id=credential.account_id)
-        else:
-            assert isinstance(credential, AIBankCredential)
-            authorization = self._bank.authorize(
-                credential=credential,
-                pay_to_account_id=pay_data["payTo"],
-                amount=amount,
-                idempotency_key=uuid.uuid4().hex,
-            )
-            self._bank.capture(authorization_id=authorization.id, credential=credential)
+        # Mismo contrato en los dos modelos (doc 13 §1): lo único que cambia es
+        # `mandate_id`. En el B la autoridad la da el permiso del titular, que
+        # ya tiene que existir (pedido + aprobado fuera de este flujo de pago).
+        # La clave de idempotencia es el `cart_id` -- un intento de pago
+        # lógico, no un intento HTTP: un reintento no cobra dos veces.
+        authorization = await self._bank.authorize(
+            payer_account_id=credential.account_id,
+            payee_account_id=pay_data["payTo"],
+            amount=amount,
+            idempotency_key=cart_id,
+            mandate_id=credential.mandate_id if isinstance(credential, AIBankMandateCredential) else None,
+        )
+        await self._bank.capture(authorization.authorization_id)
 
         details = {
-            "aibankPayload": {"authorization_id": authorization.id, "payer_account_id": credential.account_id}
+            "aibankPayload": {
+                "authorization_id": authorization.authorization_id,
+                "payer_account_id": credential.account_id,
+            }
         }
         # AIBank no tiene firma (ver docstring del módulo) -- se deja un
         # marcador no vacío para no romper el esquema pydantic de
@@ -526,6 +536,20 @@ def _receipt_from_headers(headers: Any) -> PaymentReceipt | None:
     )
 
 
+def _build_http_bank(settings: Settings) -> AIBankHttpApi:
+    if not (settings.aibank_client_id and settings.aibank_client_secret):
+        raise ValueError(
+            "AGENT_COMMERCE_AIBANK_BASE_URL requiere AGENT_COMMERCE_AIBANK_CLIENT_ID y "
+            "AGENT_COMMERCE_AIBANK_CLIENT_SECRET (la credencial de la integración)"
+        )
+    assert settings.aibank_base_url is not None
+    return AIBankHttpApi(
+        base_url=settings.aibank_base_url,
+        client_id=settings.aibank_client_id,
+        client_secret=settings.aibank_client_secret.get_secret_value(),
+    )
+
+
 class AP2Protocol(PaymentProtocol):
     name = "ap2"
 
@@ -548,18 +572,68 @@ class AP2Protocol(PaymentProtocol):
         # "soy este comerciante" no depende de cómo se cobra.
         self._merchant_signer = LocalEoaSigner()
 
-        from agent_commerce.payments.mock_aibank import MockAIBank
+        # La integración de Mercatus ante el banco: una sola credencial para
+        # todos sus agentes (AE-02). Con `aibank_base_url` configurado es el
+        # banco real (sandbox o producción) vía HTTP; sin él, `MockAIBank`.
+        self._mock_bank: MockAIBank | None = None
+        self._http_bank: AIBankHttpApi | None = None
+        self._holder_channel: HolderChannel | None = None
+        if self._settings.aibank_base_url:
+            self._http_bank = _build_http_bank(self._settings)
+            self._bank: AIBankApi = self._http_bank
+            self._aibank_network = "aibank:sandbox" if self._settings.aibank_sandbox else "aibank"
+            if self._settings.aibank_holder_url:
+                dev_key = self._settings.aibank_dev_key
+                self._holder_channel = AIBankHttpHolderChannel(
+                    base_url=self._settings.aibank_holder_url,
+                    dev_key=dev_key.get_secret_value() if dev_key else None,
+                )
+        else:
+            from agent_commerce.payments.mock_aibank import MockAIBank
 
-        self._bank: MockAIBank = MockAIBank()
+            self._mock_bank = MockAIBank()
+            secret = self._mock_bank.register_integration(_MOCK_AIBANK_CLIENT_ID)
+            self._bank = self._mock_bank.client(_MOCK_AIBANK_CLIENT_ID, secret)
+            self._holder_channel = self._mock_bank.holder_channel()
+            self._aibank_network = "aibank:mock"
         self._facilitator = build_facilitator_client(self._settings)
 
     @property
-    def bank(self) -> MockAIBank:
-        """El `MockAIBank` que liquida el riel AIBank de esta instancia --
-        expuesto para que el dashboard pueda manejar el ciclo de vida del
-        consentimiento/mandato del modelo B (pedir, consultar, revocar)
-        contra el MISMO banco con el que después se paga."""
+    def aibank(self) -> AIBankApi:
+        """La API de socio con la que liquida el riel AIBank de esta
+        instancia -- expuesta para que el dashboard maneje el consentimiento
+        y el mandato del modelo B contra el MISMO banco con el que se paga."""
         return self._bank
+
+    @property
+    def aibank_holder_channel(self) -> HolderChannel:
+        """El lado del titular (solo sandbox): reemplaza a la app del banco
+        para poder aprobar, rechazar o revocar un permiso en pruebas. En
+        producción no existe: ahí decide una persona en la app del banco."""
+        if self._holder_channel is None:
+            raise RuntimeError(
+                "Sin canal del titular: configurá AGENT_COMMERCE_AIBANK_HOLDER_URL (solo existe en el sandbox)."
+            )
+        return self._holder_channel
+
+    def provision_aibank_account(self, owner_reference: str) -> AIBankSubAccount:
+        """Abre (o reencuentra: es idempotente por `owner_reference`) una
+        sub-cuenta de la integración, con saldo inicial solo en el sandbox
+        (en producción se rechaza). Síncrono porque se usa al arrancar (CLI,
+        dashboard), antes de que haya un event loop."""
+        if self._http_bank is not None:
+            account = self._http_bank.open_account_blocking(
+                owner_reference=owner_reference,
+                initial_balance=_MOCK_AIBANK_INITIAL_BALANCE if self._settings.aibank_sandbox else None,
+            )
+        else:
+            assert self._mock_bank is not None
+            account = self._mock_bank.provision_account(
+                client_id=_MOCK_AIBANK_CLIENT_ID,
+                owner_reference=owner_reference,
+                initial_balance=_MOCK_AIBANK_INITIAL_BALANCE,
+            )
+        return AIBankSubAccount(account_id=account.account_id)
 
     def mount_seller(
         self,
@@ -586,6 +660,7 @@ class AP2Protocol(PaymentProtocol):
             rail_resolver=rail_resolver or (lambda: self._default_rail),
             facilitator=self._facilitator,
             bank=self._bank,
+            aibank_network=self._aibank_network,
         )
 
         @app.middleware("http")
@@ -624,12 +699,12 @@ class AP2Protocol(PaymentProtocol):
         # cambiar de backend de wallet en caliente y el próximo pago sigue
         # el riel correcto sin reiniciar el proceso. `self._bank`/
         # `self._facilitator` siempre están construidos (ver `__init__`).
-        # `AIBankCredential` (modelo A) y `AIBankMandateCredential` (modelo
+        # `AIBankSubAccount` (modelo A) y `AIBankMandateCredential` (modelo
         # B) comparten el mismo riel AIBANK -- el contrato de pago es
         # idéntico entre los dos modelos (`13-spec-modelos-a-y-b.md` §1), lo
         # único que cambia es qué credencial da la autoridad para pagar, y
         # eso lo resuelve `_AP2BuyerClient._pay_aibank` por tipo.
-        if isinstance(signer, (AIBankCredential, AIBankMandateCredential)):
+        if isinstance(signer, (AIBankSubAccount, AIBankMandateCredential)):
             return _AP2BuyerClient(httpx.AsyncClient(), signer, SettlementRail.AIBANK, _bank=self._bank)
         assert isinstance(signer, WalletSigner)
         scheme = ExactEvmClientScheme(signer)

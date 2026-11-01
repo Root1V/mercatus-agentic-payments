@@ -60,7 +60,7 @@ def test_titular_cannot_grant_more_than_requested() -> None:
     result = _run(*_MANDATE, "--granted-total", "0.01")
 
     assert result.exit_code == 0, result.output
-    assert "cannot_raise_requested_limits" in result.output
+    assert "limit_above_requested" in result.output
     assert "pago " not in result.output
 
 

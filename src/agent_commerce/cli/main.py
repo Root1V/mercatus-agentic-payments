@@ -57,8 +57,8 @@ def serve_example(
     from examples.seller_text_summarizer.app import build_app
 
     settings = Settings(protocol=protocol, mode=mode, ap2_settlement=ap2_settlement)
-    seller_signer = build_payer_credential(role="seller", settings=settings)
     payment_protocol = get_payment_protocol(settings)
+    seller_signer = build_payer_credential(role="seller", settings=settings, protocol=payment_protocol)
     fastapi_app = build_app(protocol=payment_protocol, pay_to=seller_signer.address)
 
     typer.echo(f"pay_to={seller_signer.address} protocol={protocol.value} mode={mode.value} port={port}")
@@ -209,8 +209,8 @@ def call(
 
     async def _run() -> None:
         settings = Settings(protocol=protocol, mode=mode, ap2_settlement=ap2_settlement)
-        buyer_signer = build_payer_credential(role="buyer", settings=settings)
         payment_protocol = get_payment_protocol(settings)
+        buyer_signer = build_payer_credential(role="buyer", settings=settings, protocol=payment_protocol)
         catalog = InMemoryServiceRegistry.from_json_file(catalog_path)
 
         async with PayingAgent(protocol=payment_protocol, signer=buyer_signer, catalog=catalog) as agent:
