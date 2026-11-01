@@ -17,7 +17,8 @@ export default defineConfig({
     // En producción (Docker), nginx hace el mismo proxy (ver frontend/nginx.conf).
     proxy: {
       "/api": {
-        target: "http://localhost:8000",
+        // `scripts/stack.sh` lo fija si el backend corre en otro puerto.
+        target: process.env.AGENT_COMMERCE_API_URL ?? "http://localhost:8000",
         changeOrigin: true,
       },
     },
