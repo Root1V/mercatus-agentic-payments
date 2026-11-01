@@ -238,3 +238,29 @@ def test_rejects_unknown_aibank_model(client: TestClient) -> None:
 
 def test_mandate_endpoint_when_nothing_is_connected(client: TestClient) -> None:
     assert client.get("/api/admin/aibank/mandate").json() == {"configured": False}
+
+
+def test_the_buyer_agent_is_registered_with_the_bank(client: TestClient) -> None:
+    agent = client.get("/api/admin/aibank/agent").json()
+    assert agent["agent_id"].startswith("agt_") and agent["key_id"].startswith("key_")
+    assert agent["account_id"].startswith("acc_")
+    # Con el banco simulado no se guarda nada: se borra al reiniciar.
+    assert agent["persisted"] is False
+
+
+def test_rotating_the_buyer_key_keeps_paying_with_the_new_key(client: TestClient) -> None:
+    """AE-11: rotar no da de baja al agente ni toca su cuenta ni sus permisos;
+    el próximo pago se firma con la clave nueva sin reiniciar el dashboard."""
+    client.put("/api/admin/wallet-settings", json={"backend": "aibank", "aibank_model": "omnibus"})
+    before = client.get("/api/admin/aibank/agent").json()
+    assert _pay_with_ap2(client).status_code == 200
+
+    rotated = client.post("/api/admin/aibank/agent/rotate-key")
+    assert rotated.status_code == 200, rotated.text
+    body = rotated.json()
+    assert body["agent_id"] == before["agent_id"]
+    assert body["previous_key_id"] == before["key_id"] and body["key_id"] != before["key_id"]
+
+    after = _pay_with_ap2(client)
+    assert after.status_code == 200, after.text
+    assert after.json()["receipt"]["payer"] == before["account_id"]

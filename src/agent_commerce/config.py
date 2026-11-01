@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     aibank_holder_url: str | None = None  # p. ej. http://localhost:8080
     aibank_dev_key: SecretStr | None = None
     aibank_sandbox: bool = True
+    # Clave maestra (Fernet) con la que se cifran en la base las claves privadas
+    # de los agentes (`payments/aibank_agent_keys.py`). Obligatoria con el banco
+    # real: sin ella no se puede guardar ni recuperar ningún agente.
+    aibank_key_encryption_key: SecretStr | None = None
 
     # --- Dashboard: persistencia + auth (extra opcional "dashboard") ---------
     # Nada de esto se usa fuera de `agent_commerce.dashboard`/`agent_commerce.auth`;

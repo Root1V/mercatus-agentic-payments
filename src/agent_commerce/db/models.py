@@ -14,7 +14,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -162,3 +162,28 @@ class WalletSettingsModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AibankAgentKeyModel(Base):
+    """Los agentes de Mercatus ante AIBank/Aerarium y su clave de firma
+    (contrato 1.1, M-15). La clave privada se guarda CIFRADA (Fernet, con la
+    clave maestra de `AGENT_COMMERCE_AIBANK_KEY_ENCRYPTION_KEY`, que nunca está
+    en la base). Un registro por `(scope, label)`: el mismo agente de Mercatus
+    es otro agente en el sandbox y en producción."""
+
+    __tablename__ = "aibank_agent_keys"
+    __table_args__ = (UniqueConstraint("scope", "label", name="uq_aibank_agent_keys_scope_label"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scope: Mapped[str] = mapped_column(String(300))
+    label: Mapped[str] = mapped_column(String(100))
+    agent_id: Mapped[str] = mapped_column(String(64))
+    agent_name: Mapped[str] = mapped_column(String(200))
+    key_id: Mapped[str] = mapped_column(String(64))
+    encrypted_private_key: Mapped[str] = mapped_column(Text)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+

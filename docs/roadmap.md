@@ -951,9 +951,49 @@ permiso de otro agente, rotación sin baja, agente dado de baja, cuenta de un so
 cobra pero no paga), y sin ningún `xfail`: el `503` de M-07 ya es `402` en su `main`. La demo de la CLI
 pagó con firma en los dos modelos contra el sandbox.
 
-**Pendiente antes de producción** (AE-11): las claves privadas viven en memoria; cada arranque registra
-un agente nuevo con una sub-cuenta nombrada por él. Falta persistirlas cifradas en nuestra base de datos
-(lo comprometido en M-11 para el sandbox) y, antes de producción, moverlas a un gestor de claves
-(KMS/HSM), que Aerarium exigirá en el contrato. Hasta entonces, `AGENT_COMMERCE_AIBANK_BUYER_ACCOUNT_ID`
-se rechaza con un mensaje claro: no hay forma de firmar por el agente dueño de esa cuenta.
+Las claves privadas vivían en memoria en esta entrega; se persisten cifradas en la siguiente (abajo).
+
+### Claves de los agentes, cifradas en la base de datos (M-15)
+
+`payments/aibank_agent_keys.py`:
+- `AgentKeyCipher` cifra la clave privada Ed25519 de cada agente con Fernet (AES-128-CBC + HMAC-SHA256).
+  La clave maestra sale de `AGENT_COMMERCE_AIBANK_KEY_ENCRYPTION_KEY` y nunca se guarda en la base.
+- La tabla `aibank_agent_keys` (migración `0008`, adaptador `SqlAibankAgentStore`) guarda un registro
+  por `(scope, label)`: el banco con la integración, y qué agente de Mercatus es. Incluye el agente, la
+  clave vigente, la clave privada cifrada y su sub-cuenta. El mismo agente de Mercatus es otro agente en
+  el sandbox y en producción.
+- `load_or_register_buyer` reusa el agente guardado: mismo agente, misma cuenta y mismos permisos tras
+  un reinicio. Si no hay ninguno, registra uno nuevo y lo guarda.
+- `rotate_agent_key` hace la rotación sin baja (AE-11) en este orden:
+  1. valida que el agente esté guardado, antes de tocar el banco;
+  2. registra la clave nueva;
+  3. **la guarda**;
+  4. recién entonces retira la vieja.
+
+  Si el retiro falla, lo guardado ya es una clave que el banco acepta.
+
+Dashboard: el agente comprador se carga en el primer uso desde la base (con el banco real) en vez de
+registrarse en cada arranque. Endpoints nuevos:
+- `GET /api/admin/aibank/agent`: el agente, su clave y si está persistido.
+- `POST /api/admin/aibank/agent/rotate-key`: el próximo pago ya firma con la clave nueva, sin
+  reiniciar (el `key_id` va en la caché del firmante).
+
+Con el banco real y sin clave maestra, el dashboard responde con un error que explica cómo generarla.
+Con el banco simulado no se persiste nada, porque se borra al reiniciar.
+
+**Verificado de punta a punta** con el dashboard real, el sandbox real de Aerarium (`3a9048f`) y Postgres
+real:
+1. arranque: registra al agente y paga;
+2. reinicio: recupera el mismo agente, la misma clave y la misma cuenta, y paga;
+3. rotación;
+4. reinicio: carga la clave rotada y paga.
+
+En la base queda un único registro con la clave en texto cifrado. La migración `0008` sube, baja y
+vuelve a subir, con `alembic check` limpio. Tests: cifrado y descifrado, clave maestra equivocada o mal
+formada, reinicio con el mismo agente, rotación guardada, retiro fallido que deja la clave nueva
+guardada, rotación sin agente guardado que no toca el banco, adaptador SQL, y rotación desde el dashboard.
+
+**Antes de producción**: pasar las claves a un gestor de claves (KMS/HSM), condición de Aerarium
+(AE-11); `AgentKeyStore` es el punto donde se enchufa. Y cada agente del playground debería ser su
+propio agente ante el banco (hoy todos pagan como el agente comprador del dashboard).
 
