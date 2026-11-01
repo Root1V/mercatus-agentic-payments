@@ -627,6 +627,15 @@ class AP2Protocol(PaymentProtocol):
         return self._bank
 
     @property
+    def aibank_scope(self) -> str | None:
+        """Qué banco e integración son: identifica dónde vale un agente
+        registrado. `None` con el banco simulado, que se borra al reiniciar --
+        guardar sus agentes no tendría sentido."""
+        if self._http_bank is None:
+            return None
+        return f"{self._settings.aibank_base_url}#{self._settings.aibank_client_id}"
+
+    @property
     def aibank_holder_channel(self) -> HolderChannel:
         """El lado del titular (solo sandbox): reemplaza a la app del banco
         para poder aprobar, rechazar o revocar un permiso en pruebas. En

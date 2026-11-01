@@ -58,6 +58,11 @@ from agent_commerce.config import AIBankModel, Protocol, Settings, SettlementRai
 from agent_commerce.db.models import UserModel
 from agent_commerce.db.session import get_db
 from agent_commerce.llm.client import LLMClientError, PrometheusLLMClient
+from agent_commerce.payments.aibank_agent_keys import (
+    AgentKeyCipher,
+    load_or_register_buyer,
+    rotate_agent_key,
+)
 from agent_commerce.payments.aibank_api import (
     AIBankError,
     ConsentRequest,
@@ -71,6 +76,7 @@ from agent_commerce.payments.aibank_credential import (
     AIBankSubAccount,
     new_intent_reference,
 )
+from agent_commerce.payments.aibank_signing import AgentIdentity
 from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
 from agent_commerce.payments.protocols.ap2_protocol import AP2Protocol
 from agent_commerce.payments.wallets.circle_wallet import CircleWalletSigner
@@ -80,6 +86,7 @@ if TYPE_CHECKING:
     from agent_commerce.payments.protocols.base import PayerCredential
 
 from .adapters.sql_agent_store import SqlAgentStore
+from .adapters.sql_aibank_agent_store import SqlAibankAgentStore
 from .adapters.sql_catalog_store import SqlCatalogStore
 from .adapters.sql_ledger_store import SqlLedgerStore
 from .adapters.sql_llm_settings_store import SqlLlmSettingsStore
@@ -204,6 +211,10 @@ class SimulateTitularApprovalRequest(BaseModel):
 
 
 _AIBANK_MODELS = tuple(model.value for model in AIBankModel)
+# El agente comprador del dashboard ante el banco: cómo se lo guarda y el
+# nombre que ve el titular al concederle un permiso.
+_AIBANK_BUYER_LABEL = "dashboard_buyer"
+_AIBANK_BUYER_AGENT_NAME = "Agente comprador del dashboard de Mercatus"
 # Saldo con el que nace la cuenta del titular de prueba del simulador: $10, en micras.
 _AIBANK_TEST_HOLDER_BALANCE = 10 * 1_000_000
 
@@ -451,12 +462,46 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         if settings.aibank_seller_account_id
         else ap2_protocol.provision_aibank_account("dashboard_seller")
     )
-    # El agente comprador del dashboard, registrado en el banco con su clave
-    # (contrato 1.1, AE-10), y su sub-cuenta del modelo A atada a él. Es
-    # también el agente al que se le piden los permisos del modelo B.
-    aibank_default_buyer = ap2_protocol.provision_aibank_buyer(agent_name="Agente comprador del dashboard de Mercatus")
-    aibank_buyer_agent = aibank_default_buyer.agent
-    assert aibank_buyer_agent is not None
+    # El agente comprador del dashboard ante el banco (contrato 1.1, AE-10):
+    # su clave de firma y su sub-cuenta del modelo A atada a él. Es también el
+    # agente al que se le piden los permisos del modelo B. Con el banco real
+    # se guarda cifrado en la base (`aibank_agent_keys`), así un reinicio
+    # reusa el MISMO agente -- y los permisos que los titulares le dieron --
+    # en vez de registrar uno nuevo. Se carga en el primer uso porque hace
+    # falta una sesión de base (y los tests la reemplazan tras construir la app).
+    aibank_buyer_holder: list[AIBankSubAccount] = []
+
+    def _aibank_key_cipher() -> AgentKeyCipher:
+        if settings.aibank_key_encryption_key is None:
+            raise HTTPException(
+                500,
+                "Con el banco real hace falta AGENT_COMMERCE_AIBANK_KEY_ENCRYPTION_KEY para guardar cifradas "
+                "las claves de los agentes. Generá una con: python -c \"from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\"",
+            )
+        return AgentKeyCipher(settings.aibank_key_encryption_key.get_secret_value())
+
+    def _aibank_buyer(db: Session) -> AIBankSubAccount:
+        if not aibank_buyer_holder:
+            scope = ap2_protocol.aibank_scope
+            if scope is None:
+                buyer = ap2_protocol.provision_aibank_buyer(agent_name=_AIBANK_BUYER_AGENT_NAME)
+            else:
+                buyer = load_or_register_buyer(
+                    protocol=ap2_protocol,
+                    store=SqlAibankAgentStore(db),
+                    cipher=_aibank_key_cipher(),
+                    scope=scope,
+                    label=_AIBANK_BUYER_LABEL,
+                    agent_name=_AIBANK_BUYER_AGENT_NAME,
+                )
+            aibank_buyer_holder.append(buyer)
+        return aibank_buyer_holder[0]
+
+    def _aibank_buyer_agent(db: Session) -> AgentIdentity:
+        agent = _aibank_buyer(db).agent
+        assert agent is not None
+        return agent
     # Estado del simulador del modelo B, solo en memoria (igual que el banco
     # simulado): lo pedido en cada solicitud y el titular de prueba de cada
     # mandato, para poder revocarlo después "desde su app".
@@ -613,27 +658,31 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                         "en 'Configurar wallet' → AIBank → Cuenta propia, pedí el permiso y "
                         "esperá a que el titular lo apruebe.",
                     )
+                buyer_agent = _aibank_buyer_agent(db)
+                # El `key_id` va en la clave de caché: tras rotar, se firma
+                # con la clave nueva sin reiniciar.
                 key: _WalletSignerKey = (
                     "aibank_mandate",
                     settings_row.aibank_mandate_id,
                     settings_row.aibank_mandate_account_id,
+                    buyer_agent.key_id,
                 )
                 if wallet_signer_holder.key != key:
                     wallet_signer_holder.signer = AIBankMandateCredential(
                         mandate_id=settings_row.aibank_mandate_id,
                         account_id=settings_row.aibank_mandate_account_id,
-                        agent=aibank_buyer_agent,
+                        agent=buyer_agent,
                     )
                     wallet_signer_holder.key = key
             else:
-                account_id = (settings_row.aibank_account_id if settings_row else None) or (
-                    aibank_default_buyer.account_id
-                )
-                key = ("aibank", account_id, "")
+                default_buyer = _aibank_buyer(db)
+                buyer_agent = _aibank_buyer_agent(db)
+                account_id = (settings_row.aibank_account_id if settings_row else None) or default_buyer.account_id
+                key = ("aibank", account_id, buyer_agent.key_id)
                 if wallet_signer_holder.key != key:
                     # Una sub-cuenta fijada a mano solo paga si está atada a
                     # este agente; si no, el banco responde `account_agent_scope`.
-                    wallet_signer_holder.signer = AIBankSubAccount(account_id=account_id, agent=aibank_buyer_agent)
+                    wallet_signer_holder.signer = AIBankSubAccount(account_id=account_id, agent=buyer_agent)
                     wallet_signer_holder.key = key
         elif backend == "circle":
             if settings_row is None or not (
@@ -1005,7 +1054,9 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             raise _aibank_http_error(exc) from exc
 
     @api.post("/admin/aibank/consent-requests", status_code=201)
-    async def api_create_aibank_consent_request(payload: CreateConsentRequestRequest) -> dict[str, Any]:
+    async def api_create_aibank_consent_request(
+        payload: CreateConsentRequestRequest, db: Session = Depends(get_db)
+    ) -> dict[str, Any]:
         if payload.max_per_operation_usd <= 0 or payload.max_total_usd <= 0:
             raise HTTPException(400, "Los topes tienen que ser mayores que cero.")
         if payload.max_per_operation_usd > payload.max_total_usd:
@@ -1020,7 +1071,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, f"Los topes van en dólares con hasta seis decimales: {exc}") from exc
         try:
             request = await aibank.create_consent_request(
-                agent_id=aibank_buyer_agent.agent_id,
+                agent_id=_aibank_buyer_agent(db).agent_id,
                 purpose=requested.purpose,
                 max_per_operation=requested.max_per_operation,
                 max_total=requested.max_total,
@@ -1127,6 +1178,38 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         except AIBankError as exc:
             raise _aibank_http_error(exc) from exc
         return _mandate_to_dict(mandate)
+
+    @api.get("/admin/aibank/agent")
+    async def api_get_aibank_agent(db: Session = Depends(get_db)) -> dict[str, Any]:
+        """El agente comprador del dashboard ante el banco (contrato 1.1)."""
+        agent = _aibank_buyer_agent(db)
+        return {
+            "agent_id": agent.agent_id,
+            "key_id": agent.key_id,
+            "account_id": _aibank_buyer(db).account_id,
+            "persisted": ap2_protocol.aibank_scope is not None,
+        }
+
+    @api.post("/admin/aibank/agent/rotate-key")
+    async def api_rotate_aibank_agent_key(db: Session = Depends(get_db)) -> dict[str, Any]:
+        """Rota la clave del agente comprador sin darlo de baja (AE-11): la
+        nueva se guarda cifrada antes de retirar la vieja en el banco."""
+        current = _aibank_buyer(db)
+        assert current.agent is not None
+        scope = ap2_protocol.aibank_scope
+        try:
+            rotated = await rotate_agent_key(
+                api=aibank,
+                current=current.agent,
+                store=SqlAibankAgentStore(db) if scope else None,
+                cipher=_aibank_key_cipher() if scope else None,
+                scope=scope,
+                label=_AIBANK_BUYER_LABEL if scope else None,
+            )
+        except AIBankError as exc:
+            raise _aibank_http_error(exc) from exc
+        aibank_buyer_holder[0] = replace(current, agent=rotated)
+        return {"agent_id": rotated.agent_id, "key_id": rotated.key_id, "previous_key_id": current.agent.key_id}
 
     @api.post("/agents", status_code=201)
     async def api_create_agent(
