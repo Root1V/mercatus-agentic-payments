@@ -9,6 +9,9 @@ export interface Agent {
   protocol: ProtocolName;
   spend_limit_usd: string | null;
   created_at: string;
+  // Permiso de un titular de AIBank para ESTE agente (modelo B, contrato 1.1).
+  aibank_mandate_id: string | null;
+  aibank_mandate_account_id: string | null;
 }
 
 export interface CreateAgentInput {

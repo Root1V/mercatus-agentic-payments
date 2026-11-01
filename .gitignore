@@ -16,3 +16,7 @@ secrets/
 # Frontend (uv.lock SÍ se commitea; node_modules/dist no)
 frontend/node_modules/
 frontend/dist/
+
+# Estado local de scripts/stack.sh: pids, logs y secretos generados (clave
+# maestra de las claves de agentes, secreto del sandbox). Nunca al repo.
+.stack/

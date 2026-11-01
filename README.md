@@ -83,6 +83,26 @@ A web panel to try out each protocol, each role (buyer/seller), the service
 catalog, and payment history, with its own login and Postgres-backed
 persistence.
 
+**The whole stack, up or down, on demand** — `scripts/stack.sh`:
+
+```bash
+scripts/stack.sh up              # dev mode: Postgres in Docker, backend + Vite native (hot reload)
+scripts/stack.sh up --sandbox    # ...plus the real Aerarium (AIBank) sandbox, wired into the dashboard
+scripts/stack.sh up --docker     # everything in containers, like production (docker-compose.yml)
+scripts/stack.sh status          # what is running, and where
+scripts/stack.sh logs backend    # follow logs: backend | frontend | docker
+scripts/stack.sh down            # stop everything; database data is kept
+```
+
+It runs migrations, seeds the catalog, and asks for an admin user the first time. Generated secrets
+(the Aerarium integration secret, the master key that encrypts agent keys) live in `.stack/`, which
+git ignores, and are never printed. **Back up `.stack/aibank_master_key`**: without it, the agent
+keys stored in the database cannot be decrypted. Ports: `STACK_PG_PORT` (5433), `STACK_API_PORT`
+(8000), `STACK_WEB_PORT` (5173); the Aerarium repo is expected at `../aerarium-agentic-banking`
+(`AERARIUM_DIR` to change it).
+
+The manual, step-by-step equivalent:
+
 **Backend** (FastAPI + SQLAlchemy 2.0 + Alembic + JWT), managed with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -72,6 +73,14 @@ class InMemoryAgentStore:
             spend_limit_usd=spend_limit_usd,
             created_at=existing.created_at,
         )
+        self._agents[agent_id] = updated
+        return updated
+
+    def set_aibank_mandate(self, agent_id: int, *, mandate_id: str, account_id: str) -> Agent | None:
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return None
+        updated = replace(agent, aibank_mandate_id=mandate_id, aibank_mandate_account_id=account_id)
         self._agents[agent_id] = updated
         return updated
 

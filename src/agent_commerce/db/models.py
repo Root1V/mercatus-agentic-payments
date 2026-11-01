@@ -83,6 +83,10 @@ class AgentModel(Base):
     protocol: Mapped[str] = mapped_column(String(16))  # "x402" | "ap2"
     spend_limit_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # AIBank modelo B (contrato 1.1): el permiso que un titular le concedió a
+    # ESTE agente. Solo lo escribe la activación, tras verificarlo en el banco.
+    aibank_mandate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    aibank_mandate_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AgentConversationModel(Base):

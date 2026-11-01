@@ -90,6 +90,10 @@ class Agent:
     protocol: str  # "x402" | "ap2"
     spend_limit_usd: Decimal | None
     created_at: datetime
+    # El permiso del titular para ESTE agente (AIBank modelo B, contrato 1.1):
+    # el mandato es de un agente concreto, ningún otro puede usarlo.
+    aibank_mandate_id: str | None = None
+    aibank_mandate_account_id: str | None = None
 
 
 @dataclass
@@ -146,6 +150,11 @@ class AgentStore(Protocol):
         spend_limit_usd: Decimal | None,
     ) -> Agent | None:
         """Reemplaza los campos editables de un agente existente. `None` si no existe."""
+        ...
+
+    def set_aibank_mandate(self, agent_id: int, *, mandate_id: str, account_id: str) -> Agent | None:
+        """Guarda el permiso que un titular concedió a este agente. Solo lo
+        escribe la activación, tras verificar contra el banco que se aprobó."""
         ...
 
     def delete_agent(self, agent_id: int) -> bool: ...

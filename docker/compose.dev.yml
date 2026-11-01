@@ -1,0 +1,8 @@
+# Override para el modo desarrollo de `scripts/stack.sh`: publica Postgres en
+# el host (solo 127.0.0.1) para que el backend nativo (`uv run`) lo alcance.
+# El docker-compose.yml base no lo publica a propósito: ahí solo lo usa la API
+# dentro de la red de compose.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${STACK_PG_PORT:-5433}:5432"

@@ -87,6 +87,10 @@ class AgentKeyStore(Protocol):
         """Crea o reemplaza el registro de `(scope, label)`."""
         ...
 
+    def delete(self, scope: str, label: str) -> None:
+        """Olvida el agente (tras darlo de baja en el banco)."""
+        ...
+
 
 class InMemoryAgentKeyStore:
     def __init__(self) -> None:
@@ -97,6 +101,9 @@ class InMemoryAgentKeyStore:
 
     def save(self, agent: StoredAgent) -> None:
         self._agents[(agent.scope, agent.label)] = agent
+
+    def delete(self, scope: str, label: str) -> None:
+        self._agents.pop((scope, label), None)
 
 
 def identity_of(stored: StoredAgent, cipher: AgentKeyCipher) -> AgentIdentity:
