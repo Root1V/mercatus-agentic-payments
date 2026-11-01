@@ -3,6 +3,7 @@ import {
   Ban,
   Bot,
   Loader2,
+  Landmark,
   Pencil,
   Plus,
   Send,
@@ -24,6 +25,7 @@ import {
   useUpdateAgent,
   useUpdateLlmSettings,
 } from "@/hooks/useAgents";
+import { AibankOwnAccountPanel } from "@/components/dashboard/AibankOwnAccountPanel";
 import type { Agent, CreateAgentInput, LlmSettings } from "@/types/agent";
 import type { ProtocolName } from "@/types/protocol";
 import { formatUsd } from "@/lib/format";
@@ -77,6 +79,8 @@ export function AgentPlaygroundPage() {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // El agente cuya cuenta del cliente (AIBank, modelo B) se está conectando.
+  const [bankAgent, setBankAgent] = useState<Agent | null>(null);
   const [form, setForm] = useState<CreateAgentInput>(EMPTY_FORM);
   const [deletingId, setDeletingId] = useState<number | undefined>();
 
@@ -175,6 +179,24 @@ export function AgentPlaygroundPage() {
                         </div>
                       </button>
                       <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                        {agent.protocol === "ap2" && (
+                          <button
+                            type="button"
+                            aria-label={`Cuenta del cliente de ${agent.name} (AIBank)`}
+                            title={
+                              agent.aibank_mandate_id
+                                ? "Cuenta del cliente conectada (AIBank)"
+                                : "Conectar la cuenta del cliente (AIBank)"
+                            }
+                            onClick={() => setBankAgent(agent)}
+                            className={cn(
+                              "rounded p-1 hover:bg-secondary hover:text-foreground",
+                              agent.aibank_mandate_id ? "text-success" : "text-muted-foreground",
+                            )}
+                          >
+                            <Landmark className="size-3.5" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           aria-label="Editar agente"
@@ -314,6 +336,18 @@ export function AgentPlaygroundPage() {
       </Dialog>
 
       <LlmSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+
+      <Dialog open={bankAgent !== null} onOpenChange={(open) => !open && setBankAgent(null)}>
+        <DialogCloseButton onClick={() => setBankAgent(null)} />
+        <DialogHeader>
+          <DialogTitle>Cuenta del cliente · {bankAgent?.name}</DialogTitle>
+          <DialogDescription>
+            Con AIBank como wallet y «Cuenta del cliente», cada agente paga con el permiso que un titular le dio
+            a él. El titular ve el nombre de este agente al aprobar, y ningún otro agente puede usar su permiso.
+          </DialogDescription>
+        </DialogHeader>
+        {bankAgent && <AibankOwnAccountPanel agentId={bankAgent.id} />}
+      </Dialog>
     </AppShell>
   );
 }

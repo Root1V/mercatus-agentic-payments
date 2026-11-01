@@ -23,6 +23,8 @@ def _to_agent(model: AgentModel) -> Agent:
         protocol=model.protocol,
         spend_limit_usd=model.spend_limit_usd,
         created_at=model.created_at,
+        aibank_mandate_id=model.aibank_mandate_id,
+        aibank_mandate_account_id=model.aibank_mandate_account_id,
     )
 
 
@@ -101,6 +103,16 @@ class SqlAgentStore:
         model.llm_model = llm_model
         model.protocol = protocol
         model.spend_limit_usd = spend_limit_usd
+        self._db.commit()
+        self._db.refresh(model)
+        return _to_agent(model)
+
+    def set_aibank_mandate(self, agent_id: int, *, mandate_id: str, account_id: str) -> Agent | None:
+        model = self._db.get(AgentModel, agent_id)
+        if model is None:
+            return None
+        model.aibank_mandate_id = mandate_id
+        model.aibank_mandate_account_id = account_id
         self._db.commit()
         self._db.refresh(model)
         return _to_agent(model)

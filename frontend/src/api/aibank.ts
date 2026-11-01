@@ -10,8 +10,17 @@ import type { WalletSettings } from "@/types/wallet";
 
 const BASE = "/api/admin/aibank";
 
-export async function createConsentRequest(input: CreateConsentRequestInput): Promise<ConsentRequest> {
-  const { data } = await apiClient.post<ConsentRequest>(`${BASE}/consent-requests`, input);
+// `agentId`: el agente del playground al que pertenece el permiso (contrato
+// 1.1 de AIBank: cada permiso es de UN agente). Sin él, es el del comprador
+// del dashboard ("Probar comprador").
+function agentParams(agentId?: number) {
+  return agentId === undefined ? undefined : { agent_id: agentId };
+}
+
+export async function createConsentRequest(input: CreateConsentRequestInput, agentId?: number): Promise<ConsentRequest> {
+  const { data } = await apiClient.post<ConsentRequest>(`${BASE}/consent-requests`, input, {
+    params: agentParams(agentId),
+  });
   return data;
 }
 
@@ -20,13 +29,15 @@ export async function fetchConsentRequest(id: string): Promise<ConsentRequest> {
   return data;
 }
 
-export async function activateConsentRequest(id: string): Promise<WalletSettings> {
-  const { data } = await apiClient.post<WalletSettings>(`${BASE}/consent-requests/${id}/activate`);
+export async function activateConsentRequest(id: string, agentId?: number): Promise<WalletSettings> {
+  const { data } = await apiClient.post<WalletSettings>(`${BASE}/consent-requests/${id}/activate`, undefined, {
+    params: agentParams(agentId),
+  });
   return data;
 }
 
-export async function fetchAibankMandate(): Promise<AibankMandateState> {
-  const { data } = await apiClient.get<AibankMandateState>(`${BASE}/mandate`);
+export async function fetchAibankMandate(agentId?: number): Promise<AibankMandateState> {
+  const { data } = await apiClient.get<AibankMandateState>(`${BASE}/mandate`, { params: agentParams(agentId) });
   return data;
 }
 
@@ -43,7 +54,9 @@ export async function simulateTitularRejection(id: string): Promise<ConsentReque
   return data;
 }
 
-export async function simulateMandateRevocation(): Promise<AibankMandate> {
-  const { data } = await apiClient.post<AibankMandate>(`${BASE}/mandate/simulate-revocation`);
+export async function simulateMandateRevocation(agentId?: number): Promise<AibankMandate> {
+  const { data } = await apiClient.post<AibankMandate>(`${BASE}/mandate/simulate-revocation`, undefined, {
+    params: agentParams(agentId),
+  });
   return data;
 }

@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Loader2, Smartphone, XCircle } from "lucide-react";
 import {
+  AibankAgentScope,
   useActivateConsentRequest,
   useAibankMandate,
   useConsentRequest,
@@ -27,7 +28,17 @@ import { Textarea } from "@/components/ui/textarea";
  * mandato. Va dentro de un `<form>` (el del diálogo de wallet), así que acá
  * no hay formularios anidados: solo botones `type="button"`.
  */
-export function AibankOwnAccountPanel() {
+export function AibankOwnAccountPanel({ agentId }: { agentId?: number } = {}) {
+  // El permiso es de UN agente (contrato 1.1): el del playground indicado, o
+  // el comprador del dashboard si no se indica. Los hooks lo leen del contexto.
+  return (
+    <AibankAgentScope.Provider value={agentId}>
+      <OwnAccountPanelBody />
+    </AibankAgentScope.Provider>
+  );
+}
+
+function OwnAccountPanelBody() {
   const mandateQuery = useAibankMandate(true);
   const [connecting, setConnecting] = useState(false);
 

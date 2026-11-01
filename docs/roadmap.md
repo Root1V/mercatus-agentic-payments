@@ -994,6 +994,42 @@ formada, reinicio con el mismo agente, rotación guardada, retiro fallido que de
 guardada, rotación sin agente guardado que no toca el banco, adaptador SQL, y rotación desde el dashboard.
 
 **Antes de producción**: pasar las claves a un gestor de claves (KMS/HSM), condición de Aerarium
-(AE-11); `AgentKeyStore` es el punto donde se enchufa. Y cada agente del playground debería ser su
-propio agente ante el banco (hoy todos pagan como el agente comprador del dashboard).
+(AE-11); `AgentKeyStore` es el punto donde se enchufa.
+
+### Cada agente del playground es su propio agente ante el banco (contrato 1.1)
+
+Antes, todos los agentes del playground pagaban como "Agente comprador del dashboard": el titular no podía
+saber qué agente concreto pagaba, y el permiso de uno servía a todos. Ahora:
+
+- **Modelo A**: cada agente del playground se registra en el banco **con su propio nombre**, que es el
+  que ve el titular. Tiene su clave y su sub-cuenta atada a él, y se registra en su primer pago. Con el
+  banco real se guarda cifrado igual que el comprador (`aibank_agent_keys`, `playground_agent_<id>`).
+- **Modelo B**: cada agente **pide su propio permiso**. El del comprador del dashboard es de otro agente
+  y el banco lo rechazaría (`mandate_agent_scope`). El permiso se guarda en el propio agente (migración
+  `0009`: `agents.aibank_mandate_id`/`aibank_mandate_account_id`). Si el agente no tiene permiso, el chat
+  responde con un error que lo nombra y explica dónde pedirlo.
+- Los endpoints del modelo B (`consent-requests`, `activate`, `mandate`, `simulate-revocation`) aceptan
+  `?agent_id=`. Sin él, siguen siendo los del comprador del dashboard ("Probar comprador"). **La
+  activación comprueba contra el banco que el permiso se pidió para ESE agente**, así que el de un
+  agente no se puede activar en otro (`409`).
+- **Borrar un agente del playground lo da de baja en el banco** (`DELETE /v1/agents/{id}`): sus claves
+  y sus permisos dejan de servir al momento, y se borra su registro cifrado. Un fallo del banco no
+  bloquea el borrado, pero queda en el log.
+- UI: en el playground, cada agente AP2 tiene un botón "Cuenta del cliente", que se pone verde cuando
+  está conectado. Abre el mismo panel del modelo B, ahora atado a ese agente mediante un contexto
+  (`AibankAgentScope`), sin pasar `agentId` por cada componente.
+- La rotación de clave por agente del playground todavía no tiene endpoint; existe solo para el
+  comprador del dashboard.
+
+Verificado:
+- 5 tests de punta a punta con el playground (LLM simulado):
+  - dos agentes pagan desde dos cuentas distintas, ninguna la del comprador;
+  - el banco registra al agente con el nombre que le dio el usuario;
+  - en el modelo B, sin permiso no paga; con el suyo paga desde la cuenta del titular, y el comprador
+    del dashboard sigue sin permiso;
+  - el permiso de un agente no se activa en otro;
+  - borrar el agente lo da de baja en el banco.
+- En el navegador: crear un agente, abrir "Cuenta del cliente", pedir el permiso, aprobarlo y ver que el
+  permiso queda en el agente y no en el comprador del dashboard.
+- La migración `0009` sube, baja y vuelve a subir en Postgres real.
 

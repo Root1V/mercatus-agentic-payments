@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createContext, useContext } from "react";
 import {
   activateConsentRequest,
   createConsentRequest,
@@ -12,13 +13,27 @@ import type { CreateConsentRequestInput, SimulateApprovalInput } from "@/types/a
 
 export const AIBANK_MANDATE_QUERY_KEY = ["aibank-mandate"] as const;
 
+// A qué agente del playground pertenece el permiso que se está mirando o
+// pidiendo (contrato 1.1: cada permiso es de UN agente). `undefined` = el del
+// comprador del dashboard. Lo fija `AibankOwnAccountPanel`.
+export const AibankAgentScope = createContext<number | undefined>(undefined);
+
+function useAgentScope(): number | undefined {
+  return useContext(AibankAgentScope);
+}
+
 // Cada cuánto se consulta una solicitud pendiente. El banco no notifica
 // (doc 13 §3.2: se consulta, no se notifica) y la decisión tarda lo que
 // tarda una persona en mirar su teléfono -- 2 s es de sobra.
 const CONSENT_POLL_MS = 2_000;
 
 export function useAibankMandate(enabled: boolean) {
-  return useQuery({ queryKey: AIBANK_MANDATE_QUERY_KEY, queryFn: fetchAibankMandate, enabled });
+  const agentId = useAgentScope();
+  return useQuery({
+    queryKey: [...AIBANK_MANDATE_QUERY_KEY, agentId ?? "dashboard"],
+    queryFn: () => fetchAibankMandate(agentId),
+    enabled,
+  });
 }
 
 export function useConsentRequest(id: string | null) {
@@ -33,16 +48,19 @@ export function useConsentRequest(id: string | null) {
 }
 
 export function useCreateConsentRequest() {
-  return useMutation({ mutationFn: (input: CreateConsentRequestInput) => createConsentRequest(input) });
+  const agentId = useAgentScope();
+  return useMutation({ mutationFn: (input: CreateConsentRequestInput) => createConsentRequest(input, agentId) });
 }
 
 export function useActivateConsentRequest() {
   const queryClient = useQueryClient();
+  const agentId = useAgentScope();
   return useMutation({
-    mutationFn: (id: string) => activateConsentRequest(id),
+    mutationFn: (id: string) => activateConsentRequest(id, agentId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wallet-settings"] });
       queryClient.invalidateQueries({ queryKey: ["protocols"] });
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
       queryClient.invalidateQueries({ queryKey: AIBANK_MANDATE_QUERY_KEY });
     },
   });
@@ -68,8 +86,9 @@ export function useSimulateTitularRejection(id: string | null) {
 
 export function useSimulateMandateRevocation() {
   const queryClient = useQueryClient();
+  const agentId = useAgentScope();
   return useMutation({
-    mutationFn: simulateMandateRevocation,
+    mutationFn: () => simulateMandateRevocation(agentId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: AIBANK_MANDATE_QUERY_KEY }),
   });
 }

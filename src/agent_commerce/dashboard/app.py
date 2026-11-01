@@ -30,6 +30,7 @@ invocable" es trabajo aparte, no incluido aquí.
 
 from __future__ import annotations
 
+import logging
 import socket
 import sys
 import threading
@@ -210,6 +211,8 @@ class SimulateTitularApprovalRequest(BaseModel):
     max_total_usd: Decimal | None = None
 
 
+logger = logging.getLogger(__name__)
+
 _AIBANK_MODELS = tuple(model.value for model in AIBankModel)
 # El agente comprador del dashboard ante el banco: cómo se lo guarda y el
 # nombre que ve el titular al concederle un permiso.
@@ -282,6 +285,8 @@ def _agent_to_dict(agent: Agent) -> dict[str, Any]:
         "protocol": agent.protocol,
         "spend_limit_usd": str(agent.spend_limit_usd) if agent.spend_limit_usd is not None else None,
         "created_at": agent.created_at.isoformat(),
+        "aibank_mandate_id": agent.aibank_mandate_id,
+        "aibank_mandate_account_id": agent.aibank_mandate_account_id,
     }
 
 
@@ -502,6 +507,64 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         agent = _aibank_buyer(db).agent
         assert agent is not None
         return agent
+
+    # Cada agente del playground es SU PROPIO agente ante el banco (contrato
+    # 1.1, AE-10): con su nombre -- el que ve el titular --, su clave, su
+    # sub-cuenta del modelo A y su propio permiso del modelo B. Se registra en
+    # el banco la primera vez que paga, y con el banco real se guarda cifrado.
+    playground_bank_agents: dict[int, AIBankSubAccount] = {}
+
+    def _playground_label(agent_id: int) -> str:
+        return f"playground_agent_{agent_id}"
+
+    def _playground_bank_identity(db: Session, agent: Agent) -> AIBankSubAccount:
+        cached = playground_bank_agents.get(agent.id)
+        if cached is not None:
+            return cached
+        scope = ap2_protocol.aibank_scope
+        if scope is None:
+            identity = ap2_protocol.provision_aibank_buyer(agent_name=agent.name)
+        else:
+            identity = load_or_register_buyer(
+                protocol=ap2_protocol,
+                store=SqlAibankAgentStore(db),
+                cipher=_aibank_key_cipher(),
+                scope=scope,
+                label=_playground_label(agent.id),
+                agent_name=agent.name,
+            )
+        playground_bank_agents[agent.id] = identity
+        return identity
+
+    def _bank_agent_for(db: Session, playground_agent_id: int | None, user_id: int) -> AgentIdentity:
+        """El agente ante el banco: el del agente del playground indicado, o
+        el comprador del dashboard ("Probar comprador") si no se indica."""
+        if playground_agent_id is None:
+            return _aibank_buyer_agent(db)
+        agent = _get_owned_agent(SqlAgentStore(db), playground_agent_id, user_id)
+        identity = _playground_bank_identity(db, agent).agent
+        assert identity is not None
+        return identity
+
+    def _playground_signer(db: Session, agent: Agent) -> PayerCredential:
+        """Con qué paga un agente del playground. Con AIBank, con SU identidad;
+        con los rieles cripto, la wallet del comprador de siempre."""
+        settings_row = SqlWalletSettingsStore(db).get()
+        backend = settings_row.backend if settings_row is not None else settings.wallet_backend.value
+        if backend != "aibank" or agent.protocol != "ap2":
+            return _get_buyer_signer(db, protocol=agent.protocol)
+        own = _playground_bank_identity(db, agent)
+        if settings_row is not None and settings_row.aibank_model == "mandate":
+            if not (agent.aibank_mandate_id and agent.aibank_mandate_account_id):
+                raise HTTPException(
+                    500,
+                    f"El agente «{agent.name}» todavía no tiene permiso de un titular de AIBank: en el "
+                    "playground, «Cuenta del cliente», pedí el permiso para este agente.",
+                )
+            return AIBankMandateCredential(
+                mandate_id=agent.aibank_mandate_id, account_id=agent.aibank_mandate_account_id, agent=own.agent
+            )
+        return own
     # Estado del simulador del modelo B, solo en memoria (igual que el banco
     # simulado): lo pedido en cada solicitud y el titular de prueba de cada
     # mandato, para poder revocarlo después "desde su app".
@@ -584,6 +647,9 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="agent_commerce dashboard", lifespan=_lifespan)
     _dashboard_app_ref.append(app)
+    # La API del banco con la que liquida AP2 sobre AIBank: para inspeccionar
+    # el estado del banco desde tests y diagnósticos, no para la UI.
+    app.state.aibank = aibank
 
     def _seller_url(protocol: str) -> str:
         return f"http://127.0.0.1:{seller_ports[protocol]}/summarize"
@@ -1047,6 +1113,12 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             return HTTPException(502, exc.code)
         return HTTPException(exc.status if 400 <= exc.status < 500 else 400, exc.code)
 
+    def _stored_mandate_id(db: Session, agent_id: int | None, user_id: int) -> str | None:
+        if agent_id is not None:
+            return _get_owned_agent(SqlAgentStore(db), agent_id, user_id).aibank_mandate_id
+        settings_row = SqlWalletSettingsStore(db).get()
+        return settings_row.aibank_mandate_id if settings_row else None
+
     async def _consent_request_or_error(consent_request_id: str) -> ConsentRequest:
         try:
             return await aibank.get_consent_request(consent_request_id)
@@ -1055,8 +1127,13 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
 
     @api.post("/admin/aibank/consent-requests", status_code=201)
     async def api_create_aibank_consent_request(
-        payload: CreateConsentRequestRequest, db: Session = Depends(get_db)
+        payload: CreateConsentRequestRequest,
+        agent_id: int | None = None,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
+        """`agent_id` (opcional): el agente del playground que pide el permiso.
+        Sin él, lo pide el comprador del dashboard ("Probar comprador")."""
         if payload.max_per_operation_usd <= 0 or payload.max_total_usd <= 0:
             raise HTTPException(400, "Los topes tienen que ser mayores que cero.")
         if payload.max_per_operation_usd > payload.max_total_usd:
@@ -1071,7 +1148,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, f"Los topes van en dólares con hasta seis decimales: {exc}") from exc
         try:
             request = await aibank.create_consent_request(
-                agent_id=_aibank_buyer_agent(db).agent_id,
+                agent_id=_bank_agent_for(db, agent_id, current_user.id).agent_id,
                 purpose=requested.purpose,
                 max_per_operation=requested.max_per_operation,
                 max_total=requested.max_total,
@@ -1088,14 +1165,27 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
 
     @api.post("/admin/aibank/consent-requests/{consent_request_id}/activate")
     async def api_activate_aibank_consent_request(
-        consent_request_id: str, db: Session = Depends(get_db)
+        consent_request_id: str,
+        agent_id: int | None = None,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        """Guarda como credencial del comprador el mandato de una solicitud
-        YA aprobada. El `mandate_id` sale del banco, nunca del cliente HTTP:
-        así nadie puede "activar" un mandato que el titular no concedió."""
+        """Guarda el mandato de una solicitud YA aprobada: como credencial del
+        comprador del dashboard, o del agente del playground `agent_id`. El
+        `mandate_id` sale del banco, nunca del cliente HTTP: así nadie puede
+        "activar" un mandato que el titular no concedió. Y tiene que ser para
+        ESE agente: el banco dice a quién se le pidió."""
         request = await _consent_request_or_error(consent_request_id)
         if request.status != "approved" or request.mandate_id is None or request.account_id is None:
             raise HTTPException(409, f"La solicitud no está aprobada (estado: {request.status}).")
+        if request.agent_id != _bank_agent_for(db, agent_id, current_user.id).agent_id:
+            raise HTTPException(409, "Ese permiso se pidió para otro agente.")
+        if agent_id is not None:
+            agent = SqlAgentStore(db).set_aibank_mandate(
+                agent_id, mandate_id=request.mandate_id, account_id=request.account_id
+            )
+            assert agent is not None
+            return _agent_to_dict(agent)
         updated = SqlWalletSettingsStore(db).set_aibank_mandate(
             mandate_id=request.mandate_id, account_id=request.account_id
         )
@@ -1148,13 +1238,17 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         return _consent_request_to_dict(request, aibank_requested.get(consent_request_id))
 
     @api.get("/admin/aibank/mandate")
-    async def api_get_aibank_mandate(db: Session = Depends(get_db)) -> dict[str, Any]:
-        """El mandato activo del comprador, con su consumo (doc 13 §3.4):
-        saber cuánto queda permite pedir una ampliación ANTES de que un pago
-        falle. `found: false` = el mandato guardado ya no existe en el banco
-        (el banco simulado vive en memoria: un reinicio del dashboard lo pierde)."""
-        settings_row = SqlWalletSettingsStore(db).get()
-        mandate_id = settings_row.aibank_mandate_id if settings_row else None
+    async def api_get_aibank_mandate(
+        agent_id: int | None = None,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """El mandato activo del comprador -- o del agente del playground
+        `agent_id` --, con su consumo (doc 13 §3.4): saber cuánto queda permite
+        pedir una ampliación ANTES de que un pago falle. `found: false` = el
+        mandato guardado ya no existe en el banco (el banco simulado vive en
+        memoria: un reinicio del dashboard lo pierde)."""
+        mandate_id = _stored_mandate_id(db, agent_id, current_user.id)
         if mandate_id is None:
             return {"configured": False}
         try:
@@ -1166,9 +1260,12 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         return {"configured": True, "found": True, **_mandate_to_dict(mandate)}
 
     @api.post("/admin/aibank/mandate/simulate-revocation")
-    async def api_simulate_aibank_mandate_revocation(db: Session = Depends(get_db)) -> dict[str, Any]:
-        settings_row = SqlWalletSettingsStore(db).get()
-        mandate_id = settings_row.aibank_mandate_id if settings_row else None
+    async def api_simulate_aibank_mandate_revocation(
+        agent_id: int | None = None,
+        current_user: UserModel = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        mandate_id = _stored_mandate_id(db, agent_id, current_user.id)
         holder = aibank_test_holders.get(mandate_id) if mandate_id else None
         if mandate_id is None or holder is None:
             raise HTTPException(404, "mandate_not_found")
@@ -1178,6 +1275,28 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         except AIBankError as exc:
             raise _aibank_http_error(exc) from exc
         return _mandate_to_dict(mandate)
+
+    async def _revoke_playground_bank_agent(db: Session, agent_id: int) -> None:
+        """Al borrar un agente del playground, se lo da de baja en el banco: sus
+        claves y sus permisos dejan de servir al momento (AE-10). Si nunca
+        pagó con AIBank, no hay nada que dar de baja."""
+        cached = playground_bank_agents.pop(agent_id, None)
+        bank_agent_id = cached.agent.agent_id if cached is not None and cached.agent is not None else None
+        scope = ap2_protocol.aibank_scope
+        if scope is not None:
+            key_store = SqlAibankAgentStore(db)
+            stored = key_store.get(scope, _playground_label(agent_id))
+            if stored is not None:
+                bank_agent_id = stored.agent_id
+                key_store.delete(scope, _playground_label(agent_id))
+        if bank_agent_id is None:
+            return
+        try:
+            await aibank.revoke_agent(bank_agent_id)
+        except AIBankError as exc:
+            # Borrar el agente no se bloquea por el banco; queda en el log para
+            # darlo de baja a mano si hiciera falta.
+            logger.warning("no se pudo dar de baja al agente %s en el banco: %s", bank_agent_id, exc.code)
 
     @api.get("/admin/aibank/agent")
     async def api_get_aibank_agent(db: Session = Depends(get_db)) -> dict[str, Any]:
@@ -1265,6 +1384,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         store = SqlAgentStore(db)
         _get_owned_agent(store, agent_id, current_user.id)
+        await _revoke_playground_bank_agent(db, agent_id)
         store.delete_agent(agent_id)
         return {"deleted": True, "id": agent_id}
 
@@ -1318,9 +1438,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         prompt = _build_prompt_with_history(prior_messages, payload.content)
 
         # La tarea es la conversación: todos sus pagos comparten la referencia (AE-10).
-        buyer_signer = _with_intent_reference(
-            _get_buyer_signer(db, protocol=agent.protocol), f"conversation-{conversation.id}"
-        )
+        buyer_signer = _with_intent_reference(_playground_signer(db, agent), f"conversation-{conversation.id}")
         async with PayingAgent(
             protocol=protocols[agent.protocol], signer=buyer_signer, catalog=_agent_catalog(agent.protocol)
         ) as paying_agent:

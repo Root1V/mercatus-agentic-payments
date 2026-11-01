@@ -46,3 +46,9 @@ class SqlAibankAgentStore:
         model.encrypted_private_key = agent.encrypted_private_key
         model.account_id = agent.account_id
         self._db.commit()
+
+    def delete(self, scope: str, label: str) -> None:
+        model = self._find(scope, label)
+        if model is not None:
+            self._db.delete(model)
+            self._db.commit()
