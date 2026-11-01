@@ -24,9 +24,7 @@ import asyncio
 import sys
 import threading
 import time
-import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -37,9 +35,9 @@ import uvicorn
 
 from agent_commerce.catalog.registry import InMemoryServiceRegistry
 from agent_commerce.config import Mode, Protocol, Settings, SettlementRail
+from agent_commerce.payments.aibank_api import AIBankError, micros_to_usd, usd_to_micros
 from agent_commerce.payments.aibank_credential import AIBankMandateCredential
 from agent_commerce.payments.factory import build_payer_credential, get_payment_protocol
-from agent_commerce.payments.mock_aibank import AIBankError
 from agent_commerce.payments.protocols.ap2_protocol import AP2Protocol
 from examples.buyer_research_agent.agent import ResearchAgent
 from examples.seller_text_summarizer.app import build_app
@@ -64,8 +62,11 @@ _AIBANK_ERROR_EXPLANATIONS = {
     "mandate_revoked": "el titular revocó el permiso. Hay que pedirle consentimiento de nuevo.",
     "mandate_expired": "el permiso del titular venció. Hay que pedirle consentimiento de nuevo.",
     "insufficient_funds": "la cuenta del titular no tiene saldo. Esto sí es falta de dinero.",
-    "cannot_raise_requested_limits": "el titular puede bajar los topes pedidos, nunca subirlos.",
+    "limit_above_requested": "el titular puede bajar los topes pedidos, nunca subirlos.",
 }
+
+# Saldo con el que nace la cuenta del titular de prueba: $10, en micras.
+_HOLDER_BALANCE = 10 * 1_000_000
 
 
 @dataclass(frozen=True)
@@ -117,7 +118,7 @@ async def run_demo(
         raise ValueError("el modelo B (cuenta del cliente) solo existe con --protocol ap2 --ap2-settlement aibank")
     seller_protocol = get_payment_protocol(settings)
     buyer_protocol = seller_protocol if shares_state else get_payment_protocol(settings)
-    seller_signer = build_payer_credential(role="seller", settings=settings)
+    seller_signer = build_payer_credential(role="seller", settings=settings, protocol=seller_protocol)
 
     app = build_app(protocol=seller_protocol, pay_to=seller_signer.address)
     server = _run_seller(app, "127.0.0.1", port)
@@ -140,7 +141,7 @@ async def run_demo(
             await _run_mandate_flow(seller_protocol, catalog, mandate)
             return
 
-        buyer_signer = build_payer_credential(role="buyer", settings=settings)
+        buyer_signer = build_payer_credential(role="buyer", settings=settings, protocol=buyer_protocol)
         print(f"vendedor pay_to = {seller_signer.address}")
         print(f"comprador       = {buyer_signer.address}")
         print()
@@ -168,78 +169,91 @@ async def run_demo(
 
 async def _run_mandate_flow(protocol: AP2Protocol, catalog: InMemoryServiceRegistry, options: MandateDemo) -> None:
     """Los 4 pasos del modelo B (doc 13 §3), en el orden en que ocurren en
-    producción. Solo el paso 2 es simulado: en AIBank real lo hace el
-    titular en SU app, y Mercatus se entera haciendo polling."""
-    bank = protocol.bank
+    producción y contra el mismo puerto (`AIBankApi`) que usará el cliente
+    HTTP real. Solo el paso 2 es simulado (`HolderChannel`): en el banco real
+    lo hace el titular en SU app, y Mercatus se entera haciendo polling."""
+    bank = protocol.aibank
+    holders = protocol.aibank_holder_channel
     print()
     print("--- 1. Mercatus pide permiso (sin elegir cuenta: la elige el titular) ---")
-    request = bank.request_consent(
-        currency="USD",
-        max_per_operation=options.max_per_operation,
-        max_total=options.max_total,
+    request = await bank.create_consent_request(
         purpose=_MANDATE_PURPOSE,
+        max_per_operation=usd_to_micros(options.max_per_operation),
+        max_total=usd_to_micros(options.max_total),
     )
-    print(f"solicitud:        {request.id}")
+    print(f"solicitud:        {request.consent_request_id}")
     print(f"código titular:   {request.handoff_code}")
-    print(f"tope por pago:    ${request.max_per_operation}")
-    print(f"tope total:       ${request.max_total}")
-    print(f"propósito:        {request.purpose}")
+    print(f"tope por pago:    ${options.max_per_operation}")
+    print(f"tope total:       ${options.max_total}")
+    print(f"propósito:        {_MANDATE_PURPOSE}")
 
     print()
     print("--- 2. El titular decide [simulador: reemplaza la app de AIBank] ---")
-    if options.titular_rejects:
-        request = bank.simulate_titular_rejection(consent_request_id=request.id)
-        print(f"estado:           {request.status}")
-        print("El titular rechazó el permiso: no nace ningún mandato, el agente no puede pagar.")
+    holder = await holders.create_test_holder(name="Titular de prueba", initial_balance=_HOLDER_BALANCE)
+    try:
+        if options.titular_rejects:
+            await holders.reject(holder, request.handoff_code)
+        else:
+            granted_total = options.granted_max_total or options.max_total
+            await holders.approve(
+                holder,
+                request.handoff_code,
+                account_id=holder.account_id,
+                max_per_operation=usd_to_micros(options.max_per_operation),
+                max_total=usd_to_micros(granted_total),
+            )
+    except AIBankError as exc:
+        print(f"el banco rechazó la decisión ({exc.code}) -- {_AIBANK_ERROR_EXPLANATIONS.get(exc.code, exc.message)}")
         return
 
-    holder_account_id = f"acc_{uuid.uuid4().hex[:12]}"
-    try:
-        mandate = bank.simulate_titular_approval(
-            consent_request_id=request.id,
-            account_id=holder_account_id,
-            max_total=options.granted_max_total,
-        )
-    except AIBankError as exc:
-        code = str(exc)
-        print(f"el banco rechazó la aprobación ({code}) -- {_AIBANK_ERROR_EXPLANATIONS.get(code, code)}")
+    # Lo que haría Mercatus en producción: consultar hasta que deje de estar
+    # pendiente. Acá la decisión ya ocurrió, así que alcanza una consulta.
+    request = await bank.get_consent_request(request.consent_request_id)
+    print(f"estado:           {request.status}")
+    if request.status != "approved":
+        print("El titular rechazó el permiso: no nace ningún mandato, el agente no puede pagar.")
         return
-    granted_note = "" if mandate.max_total == request.max_total else f" (pedido: ${request.max_total})"
-    print(f"aprobado sobre la cuenta {mandate.account_id}")
-    print(f"mandato:          {mandate.id}")
-    print(f"tope total:       ${mandate.max_total}{granted_note}")
-    print(f"vence:            {datetime.fromtimestamp(mandate.expires_at, tz=UTC):%Y-%m-%d %H:%M} UTC")
+    assert request.mandate_id is not None and request.account_id is not None
+    mandate = await bank.get_mandate(request.mandate_id)
+    granted_note = "" if mandate.max_total == usd_to_micros(options.max_total) else f" (pedido: ${options.max_total})"
+    print(f"aprobado sobre la cuenta {request.account_id} (Mercatus la conoce recién ahora)")
+    print(f"mandato:          {mandate.mandate_id}")
+    print(f"tope total:       ${_usd(mandate.max_total)}{granted_note}")
+    print(f"vence:            {mandate.expires_at:%Y-%m-%d %H:%M} UTC")
 
     print()
     print("--- 3. El agente paga con el permiso, desde la cuenta del cliente ---")
-    credential = AIBankMandateCredential(mandate_id=mandate.id, account_id=mandate.account_id)
+    credential = AIBankMandateCredential(mandate_id=mandate.mandate_id, account_id=request.account_id)
     async with ResearchAgent(protocol=protocol, signer=credential, catalog=catalog) as agent:
         for number in range(1, options.payments + 1):
             label = f"pago {number}/{options.payments}:"
             try:
                 result = await agent.summarize(_TEXT, max_sentences=2)
             except AIBankError as exc:
-                code = str(exc)
-                explanation = _AIBANK_ERROR_EXPLANATIONS.get(code, "rechazado por el banco.")
-                print(f"{label} RECHAZADO ({code}) -- {explanation}")
+                explanation = _AIBANK_ERROR_EXPLANATIONS.get(exc.code, "rechazado por el banco.")
+                print(f"{label} RECHAZADO ({exc.code}) -- {explanation}")
             else:
-                usage = bank.mandate_usage(mandate.id)
+                usage = await bank.get_mandate(mandate.mandate_id)
                 settlement = f" · liquidación {result.receipt.settlement_id}" if result.receipt else ""
                 print(
-                    f"{label} ok · consumido ${usage.consumed} de ${mandate.max_total} "
-                    f"· quedan ${usage.remaining}{settlement}"
+                    f"{label} ok · consumido ${_usd(usage.consumed)} de ${_usd(usage.max_total)} "
+                    f"· quedan ${_usd(usage.remaining)}{settlement}"
                 )
 
             if options.revoke_after == number:
-                bank.revoke_mandate(mandate.id)
+                await holders.revoke(holder, mandate.mandate_id)
                 print("[simulador] el titular revoca el permiso desde la app de AIBank")
 
     print()
     print("--- 4. Consumo final del mandato ---")
-    usage = bank.mandate_usage(mandate.id)
-    print(f"estado:           {mandate.status}")
-    print(f"consumido:        ${usage.consumed} de ${mandate.max_total}")
-    print(f"quedan:           ${usage.remaining}")
+    final = await bank.get_mandate(mandate.mandate_id)
+    print(f"estado:           {final.status}")
+    print(f"consumido:        ${_usd(final.consumed)} de ${_usd(final.max_total)}")
+    print(f"quedan:           ${_usd(final.remaining)}")
+
+
+def _usd(micros: int | None) -> str:
+    return "sin tope" if micros is None else str(micros_to_usd(micros))
 
 
 def main() -> None:

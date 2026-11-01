@@ -1,7 +1,8 @@
 import { isAxiosError } from "axios";
 
-// Códigos de error de AIBank (doc 13 §5) que el comprador puede encontrar al
-// pagar, explicados por quién los arregla -- el spec insiste en no colapsar
+// Códigos de error de AIBank (doc 11 §7 y doc 13 §5, los mismos que emite la
+// API real) que el comprador puede encontrar al pagar, explicados por quién
+// los arregla -- el spec insiste en no colapsar
 // "falta permiso" con "falta dinero": uno lo resuelve el titular, el otro
 // fondeando.
 const AIBANK_ERROR_EXPLANATIONS: Record<string, string> = {
@@ -15,8 +16,12 @@ const AIBANK_ERROR_EXPLANATIONS: Record<string, string> = {
   insufficient_funds: "La cuenta pagadora no tiene saldo suficiente.",
   consent_request_not_found: "La solicitud de permiso no existe o ya venció (vive una hora). Pedí una nueva.",
   consent_request_already_resolved: "El titular ya decidió sobre esta solicitud.",
-  cannot_raise_requested_limits: "El titular puede conceder menos de lo pedido, nunca más.",
+  account_not_found: "Esa cuenta no existe en el banco (o no es de Mercatus). Dejá la sub-cuenta vacía para usar una propia.",
+  account_frozen: "La cuenta está congelada por un control del banco y no admite movimientos.",
   malformed_request: "Faltan datos en la solicitud: el propósito es obligatorio.",
+  // Canal del titular (la app del banco), con su propio vocabulario.
+  limit_above_requested: "El titular puede conceder menos de lo pedido, nunca más.",
+  already_resolved: "El titular ya decidió sobre esta solicitud.",
 };
 
 /** El mensaje que conviene mostrar: el `detail` que manda el backend (no el

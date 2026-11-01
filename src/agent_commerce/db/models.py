@@ -147,11 +147,11 @@ class WalletSettingsModel(Base):
     circle_api_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     circle_entity_secret: Mapped[str | None] = mapped_column(String(500), nullable=True)
     circle_wallet_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    # AIBank (RM-18): ambos opcionales -- a diferencia de Circle, si se dejan
-    # vacíos `AIBankCredential` genera una cuenta efímera al vuelo, así que
-    # no hace falta exigirlos la primera vez que se elige este backend.
+    # AIBank modelo A (RM-18): la sub-cuenta del comprador, opcional -- vacía,
+    # el dashboard usa una que abre solo en el banco. La columna
+    # `aibank_api_key` se eliminó en 0007: la API real no tiene clave por
+    # cuenta, se autentica la integración (AE-02).
     aibank_account_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    aibank_api_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # AIBank modelo B (cuenta propia, RM-18): "omnibus" (modelo A, default
     # si es NULL) o "mandate". El mandato activo NO se edita a mano: solo lo
     # escribe `POST /api/admin/aibank/consent-requests/{id}/activate`, tras

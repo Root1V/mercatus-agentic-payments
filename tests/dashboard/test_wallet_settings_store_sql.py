@@ -19,7 +19,6 @@ def test_upsert_local_backend_needs_no_circle_fields(db_session: Session) -> Non
         circle_entity_secret=None,
         circle_wallet_id=None,
         aibank_account_id=None,
-        aibank_api_key=None,
     )
     assert created.backend == "local"
 
@@ -36,7 +35,6 @@ def test_upsert_circle_creates_then_get_returns_it(db_session: Session) -> None:
         circle_entity_secret="a" * 64,
         circle_wallet_id="wallet-1",
         aibank_account_id=None,
-        aibank_api_key=None,
     )
     assert created.circle_entity_secret == "a" * 64
 
@@ -55,7 +53,6 @@ def test_upsert_circle_without_secret_keeps_existing_secret(db_session: Session)
         circle_entity_secret="a" * 64,
         circle_wallet_id="wallet-1",
         aibank_account_id=None,
-        aibank_api_key=None,
     )
 
     updated = store.upsert(
@@ -64,7 +61,6 @@ def test_upsert_circle_without_secret_keeps_existing_secret(db_session: Session)
         circle_entity_secret=None,
         circle_wallet_id="wallet-2",
         aibank_account_id=None,
-        aibank_api_key=None,
     )
 
     assert updated.circle_api_key == "key-2"
@@ -81,7 +77,6 @@ def test_upsert_circle_without_secret_on_empty_store_raises(db_session: Session)
             circle_entity_secret=None,
             circle_wallet_id="wallet-1",
             aibank_account_id=None,
-            aibank_api_key=None,
         )
 
 
@@ -94,7 +89,6 @@ def test_switching_back_to_local_does_not_require_circle_secret(db_session: Sess
         circle_entity_secret="a" * 64,
         circle_wallet_id="wallet-1",
         aibank_account_id=None,
-        aibank_api_key=None,
     )
 
     updated = store.upsert(
@@ -103,14 +97,14 @@ def test_switching_back_to_local_does_not_require_circle_secret(db_session: Sess
         circle_entity_secret=None,
         circle_wallet_id=None,
         aibank_account_id=None,
-        aibank_api_key=None,
     )
     assert updated.backend == "local"
 
 
 def test_upsert_aibank_backend_needs_no_fields(db_session: Session) -> None:
-    """A diferencia de Circle, AIBank no exige nada la primera vez -- se
-    generan efímeros al vuelo si se dejan vacíos (ver `AIBankCredential`)."""
+    """A diferencia de Circle, AIBank no exige nada la primera vez: sin
+    sub-cuenta, el dashboard usa una que abre solo en el banco. Y no hay API
+    key que guardar -- en la API real se autentica la integración (AE-02)."""
     store = SqlWalletSettingsStore(db_session)
     created = store.upsert(
         backend="aibank",
@@ -118,54 +112,26 @@ def test_upsert_aibank_backend_needs_no_fields(db_session: Session) -> None:
         circle_entity_secret=None,
         circle_wallet_id=None,
         aibank_account_id=None,
-        aibank_api_key=None,
     )
     assert created.backend == "aibank"
     assert created.aibank_account_id is None
-    assert created.aibank_api_key is None
 
 
-def test_upsert_aibank_with_fields_then_get_returns_them(db_session: Session) -> None:
+def test_upsert_aibank_with_account_then_get_returns_it(db_session: Session) -> None:
     store = SqlWalletSettingsStore(db_session)
+    account_id = "acc_" + "1" * 32
     created = store.upsert(
         backend="aibank",
         circle_api_key=None,
         circle_entity_secret=None,
         circle_wallet_id=None,
-        aibank_account_id="aibank_account_1",
-        aibank_api_key="sk_aibank_1",
+        aibank_account_id=account_id,
     )
-    assert created.aibank_account_id == "aibank_account_1"
-    assert created.aibank_api_key == "sk_aibank_1"
+    assert created.aibank_account_id == account_id
 
     fetched = store.get()
     assert fetched is not None
-    assert fetched.aibank_account_id == "aibank_account_1"
-    assert fetched.aibank_api_key == "sk_aibank_1"
-
-
-def test_upsert_aibank_without_api_key_keeps_existing_one(db_session: Session) -> None:
-    store = SqlWalletSettingsStore(db_session)
-    store.upsert(
-        backend="aibank",
-        circle_api_key=None,
-        circle_entity_secret=None,
-        circle_wallet_id=None,
-        aibank_account_id="account-1",
-        aibank_api_key="key-1",
-    )
-
-    updated = store.upsert(
-        backend="aibank",
-        circle_api_key=None,
-        circle_entity_secret=None,
-        circle_wallet_id=None,
-        aibank_account_id="account-2",
-        aibank_api_key=None,
-    )
-
-    assert updated.aibank_account_id == "account-2"
-    assert updated.aibank_api_key == "key-1"
+    assert fetched.aibank_account_id == account_id
 
 
 def test_set_aibank_mandate_on_empty_store_switches_to_model_b(db_session: Session) -> None:
@@ -189,7 +155,6 @@ def test_upsert_keeps_mandate_and_model_when_not_given(db_session: Session) -> N
         circle_entity_secret=None,
         circle_wallet_id=None,
         aibank_account_id=None,
-        aibank_api_key=None,
     )
     assert kept.aibank_model == "mandate"
 
@@ -199,7 +164,6 @@ def test_upsert_keeps_mandate_and_model_when_not_given(db_session: Session) -> N
         circle_entity_secret=None,
         circle_wallet_id=None,
         aibank_account_id=None,
-        aibank_api_key=None,
         aibank_model="omnibus",
     )
     assert omnibus.aibank_model == "omnibus"

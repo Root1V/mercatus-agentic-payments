@@ -206,11 +206,10 @@ class WalletSettings:
     circle_api_key: str | None
     circle_entity_secret: str | None
     circle_wallet_id: str | None
-    # AIBank (RM-18): a diferencia de Circle, ambos son opcionales incluso la
-    # primera vez -- si se dejan vacíos, `AIBankCredential` genera una cuenta
-    # efímera al vuelo (no depende de un proveedor externo).
+    # AIBank modelo A (RM-18): la sub-cuenta del comprador, opcional -- vacía,
+    # se usa una que el dashboard abre sola en el banco. Sin API key: en la
+    # API real se autentica la integración, no cada cuenta (AE-02).
     aibank_account_id: str | None
-    aibank_api_key: str | None
     updated_at: datetime
     # AIBank modelo B (cuenta propia): "omnibus" | "mandate" -- `None` en
     # filas anteriores a la migración 0006 equivale a "omnibus".
@@ -235,14 +234,13 @@ class WalletSettingsStore(Protocol):
         circle_entity_secret: str | None,
         circle_wallet_id: str | None,
         aibank_account_id: str | None,
-        aibank_api_key: str | None,
         aibank_model: str | None = None,
     ) -> WalletSettings:
-        """Crea o actualiza la fila única. `circle_api_key`/`circle_entity_secret`/
-        `aibank_api_key` en `None` conservan lo ya guardado (son credenciales
-        -- el API key de Circle y el de AIBank autentican solos, no son
-        identificadores públicos como el `client_id` de OAuth2 -- así se
-        puede editar el resto sin reescribirlos). `aibank_model` en `None`
+        """Crea o actualiza la fila única. `circle_api_key`/`circle_entity_secret`
+        en `None` conservan lo ya guardado (son credenciales -- el API key de
+        Circle autentica solo, no es un identificador público como el
+        `client_id` de OAuth2 -- así se puede editar el resto sin
+        reescribirlos). `aibank_model` en `None`
         también conserva lo guardado. El mandato del modelo B nunca se toca
         acá -- ver `set_aibank_mandate`."""
         ...

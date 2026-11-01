@@ -79,15 +79,24 @@ class Settings(BaseSettings):
     circle_buyer_wallet_id: str | None = None
     circle_seller_wallet_id: str | None = None
 
-    # --- AIBank (riel de banco propio, RM-18) ---------------------------------
-    # Solo aplica con protocol=aibank. Sin valores, en modo mock se generan
-    # cuenta/api key efímeras al vuelo (mismo criterio que LocalEoaSigner sin
-    # private_key) -- fijalos solo si necesitás reusar la misma cuenta entre
-    # corridas (p. ej. contra un AIBank real el día que exista uno).
+    # --- AIBank / Aerarium (riel de banco propio, RM-18) ----------------------
+    # Solo aplica con protocol=ap2 + ap2_settlement=aibank. Las sub-cuentas de
+    # cada rol (`acc_...`); sin valor, se abren solas en el banco al arrancar
+    # (idempotente por owner_reference). No hay API key por cuenta: en la API
+    # real se autentica la integración, no el agente (AE-02).
     aibank_buyer_account_id: str | None = None
-    aibank_buyer_api_key: SecretStr | None = None
     aibank_seller_account_id: str | None = None
-    aibank_seller_api_key: SecretStr | None = None
+    # El banco real, vía HTTP (`payments/aibank_http.py`). Sin `aibank_base_url`
+    # se usa `MockAIBank` en memoria. La credencial es de la INTEGRACIÓN
+    # (OAuth2 `client_credentials`), no de cada agente.
+    aibank_base_url: str | None = None  # API de socio, p. ej. http://localhost:8081
+    aibank_client_id: str | None = None
+    aibank_client_secret: SecretStr | None = None
+    # Solo sandbox: el canal del titular (aprobar/rechazar/revocar en pruebas),
+    # su clave si está alojado, y si las cuentas nuevas nacen con saldo de prueba.
+    aibank_holder_url: str | None = None  # p. ej. http://localhost:8080
+    aibank_dev_key: SecretStr | None = None
+    aibank_sandbox: bool = True
 
     # --- Dashboard: persistencia + auth (extra opcional "dashboard") ---------
     # Nada de esto se usa fuera de `agent_commerce.dashboard`/`agent_commerce.auth`;

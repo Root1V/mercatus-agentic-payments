@@ -1,19 +1,18 @@
 """AP2 liquidado sobre el riel AIBank (RM-18: `Settings.ap2_settlement=aibank`
 en vez de x402). Mismo mandato Cart/Payment que `test_ap2_protocol_mock.py`,
-pero con `AIBankCredential` -- ese archivo verifica el riel x402 y no toca
-ninguno de estos casos.
+pero pagando desde una sub-cuenta (modelo A) o con un mandato (modelo B) --
+ese archivo verifica el riel x402 y no toca ninguno de estos casos.
 
-`AP2Protocol` mantiene un `MockAIBank` por instancia, así que vendedor y
-comprador tienen que compartir la MISMA instancia de `AP2Protocol` para que
-la autorización que arma el comprador sea visible al vendedor al redimir
-(ver `payments/protocols/ap2_protocol.py`)."""
+`AP2Protocol` mantiene un banco por instancia, así que vendedor y comprador
+tienen que compartir la MISMA instancia de `AP2Protocol` para que la
+autorización que arma el comprador sea visible al vendedor al redimir (ver
+`payments/protocols/ap2_protocol.py`)."""
 
 from __future__ import annotations
 
 import socket
 import threading
 import time
-from decimal import Decimal
 
 import httpx
 import pytest
@@ -21,7 +20,8 @@ import uvicorn
 from fastapi import FastAPI
 
 from agent_commerce.config import Mode, Protocol, Settings, SettlementRail
-from agent_commerce.payments.aibank_credential import AIBankCredential, AIBankMandateCredential
+from agent_commerce.payments.aibank_api import AIBankError
+from agent_commerce.payments.aibank_credential import AIBankMandateCredential, AIBankSubAccount
 from agent_commerce.payments.protocols.ap2_protocol import AP2Protocol
 
 
@@ -58,7 +58,7 @@ def _new_protocol() -> AP2Protocol:
 
 async def test_unpaid_request_returns_402_with_cart_mandate_offering_aibank() -> None:
     protocol = _new_protocol()
-    app = _build_app(protocol, pay_to=AIBankCredential().account_id)
+    app = _build_app(protocol, pay_to=protocol.provision_aibank_account("seller").account_id)
     port = _free_port()
     server = _run_app(app, port)
     try:
@@ -74,8 +74,8 @@ async def test_unpaid_request_returns_402_with_cart_mandate_offering_aibank() ->
 
 async def test_paid_request_settles_via_aibank_and_returns_result() -> None:
     protocol = _new_protocol()
-    seller = AIBankCredential()
-    buyer = AIBankCredential()
+    seller = protocol.provision_aibank_account("seller")
+    buyer = protocol.provision_aibank_account("buyer")
     app = _build_app(protocol, pay_to=seller.account_id)
     port = _free_port()
     server = _run_app(app, port)
@@ -101,12 +101,15 @@ async def test_paid_request_settles_via_aibank_and_returns_result() -> None:
         server.should_exit = True
 
 
-async def test_reusing_the_same_cart_mandate_twice_is_rejected() -> None:
-    """Mismo anti-replay que el riel x402 (`test_ap2_protocol_mock.py`),
-    ahora sobre AIBank."""
+async def test_reusing_the_same_cart_mandate_twice_is_rejected_and_charged_once() -> None:
+    """Mismo anti-replay que el riel x402 (`test_ap2_protocol_mock.py`), ahora
+    sobre AIBank -- y del lado del banco, la `Idempotency-Key` es el
+    `cart_id`: armar el pago dos veces para el mismo carrito reencuentra la
+    misma autorización en vez de cobrar dos veces."""
     protocol = _new_protocol()
-    seller = AIBankCredential()
-    buyer = AIBankCredential()
+    seller = protocol.provision_aibank_account("seller")
+    buyer = protocol.provision_aibank_account("buyer")
+    balance_before = protocol._mock_bank.available_balance(buyer.account_id)
     app = _build_app(protocol, pay_to=seller.account_id)
     port = _free_port()
     server = _run_app(app, port)
@@ -120,7 +123,8 @@ async def test_reusing_the_same_cart_mandate_twice_is_rejected() -> None:
         from agent_commerce.payments.protocols.ap2_protocol import _AP2_PAYMENT_MANDATE_HEADER
 
         cart_mandate = CartMandate.model_validate(cart_response.json()["cartMandate"])
-        header_value = buyer_client._build_payment_mandate_header(cart_mandate)
+        header_value = await buyer_client._build_payment_mandate_header(cart_mandate)
+        await buyer_client._build_payment_mandate_header(cart_mandate)  # reintento del mismo carrito
 
         first = await buyer_client._http.post(
             f"http://127.0.0.1:{port}/echo", json={"n": 1}, headers={_AP2_PAYMENT_MANDATE_HEADER: header_value}
@@ -133,33 +137,36 @@ async def test_reusing_the_same_cart_mandate_twice_is_rejected() -> None:
         assert first.status_code == 200
         assert second.status_code == 402
         assert "cart_already_redeemed" in second.json()["error"]
+        assert balance_before - protocol._mock_bank.available_balance(buyer.account_id) == 1000
     finally:
         server.should_exit = True
 
 
 async def test_paid_request_settles_via_aibank_model_b_mandate() -> None:
-    """Modelo B (`13-spec-modelos-a-y-b.md` §3): el comprador no trae una
-    API key propia -- trae un mandato que un titular real ya aprobó. El
-    contrato de pago (`CartMandate`/`PaymentMandate`, recibo) es idéntico al
-    del modelo A; lo único que cambia es la credencial."""
+    """Modelo B (`13-spec-modelos-a-y-b.md` §3): el comprador no paga desde
+    una sub-cuenta nuestra -- trae un mandato que un titular ya aprobó sobre
+    SU cuenta. El contrato de pago (`CartMandate`/`PaymentMandate`, recibo)
+    es idéntico al del modelo A; lo único que cambia es la credencial."""
     protocol = _new_protocol()
-    seller = AIBankCredential()
+    seller = protocol.provision_aibank_account("seller")
     app = _build_app(protocol, pay_to=seller.account_id)
     port = _free_port()
     server = _run_app(app, port)
 
     try:
-        titular_account_id = "acc_titular_real"
-        consent_request = protocol._bank.request_consent(
-            currency="USD",
-            max_per_operation=Decimal(1),
-            max_total=Decimal(10),
-            purpose="Pagos del agente de investigación de Acme S.A.",
+        request = await protocol.aibank.create_consent_request(
+            purpose="Pagos del agente de investigación de Acme S.A.", max_per_operation=1_000_000, max_total=10_000_000
         )
-        mandate = protocol._bank.simulate_titular_approval(
-            consent_request_id=consent_request.id, account_id=titular_account_id
+        holders = protocol.aibank_holder_channel
+        holder = await holders.create_test_holder(name="Ana", initial_balance=50_000_000)
+        await holders.approve(
+            holder, request.handoff_code, account_id=holder.account_id, max_per_operation=1_000_000, max_total=10_000_000
         )
-        buyer = AIBankMandateCredential(mandate_id=mandate.id, account_id=titular_account_id)
+        # La cuenta del titular se aprende de la API de socio (`acc_`), no del
+        # canal del titular (AE-06).
+        approved = await protocol.aibank.get_consent_request(request.consent_request_id)
+        assert approved.mandate_id is not None and approved.account_id is not None
+        buyer = AIBankMandateCredential(mandate_id=approved.mandate_id, account_id=approved.account_id)
 
         buyer_client = protocol.build_buyer_client(buyer)
         try:
@@ -171,36 +178,32 @@ async def test_paid_request_settles_via_aibank_model_b_mandate() -> None:
 
         assert result.status_code == 200
         assert result.receipt is not None
-        assert result.receipt.payer == titular_account_id
+        assert result.receipt.payer == approved.account_id
         assert result.receipt.pay_to == seller.account_id
         assert str(result.receipt.amount_usd) == "0.001"
 
-        usage = protocol._bank.mandate_usage(mandate.id)
-        assert usage.consumed == Decimal("0.001")
+        usage = await protocol.aibank.get_mandate(approved.mandate_id)
+        assert usage.consumed == 1000
     finally:
         server.should_exit = True
 
 
-async def test_wrong_api_key_for_a_known_account_is_rejected() -> None:
+async def test_paying_from_an_account_the_integration_never_opened_is_rejected() -> None:
+    """Lo que reemplaza a "API key equivocada": en la API real no hay clave
+    por cuenta (se autentica la integración), así que el equivalente es
+    pagar desde una cuenta que esta integración no abrió -- `404
+    account_not_found`, igual que una inexistente (doc 11, escenarios 12-13)."""
     protocol = _new_protocol()
-    seller = AIBankCredential()
-    buyer = AIBankCredential()
+    seller = protocol.provision_aibank_account("seller")
     app = _build_app(protocol, pay_to=seller.account_id)
     port = _free_port()
     server = _run_app(app, port)
 
     try:
-        buyer_client = protocol.build_buyer_client(buyer)
-        try:
-            first = await buyer_client.request("POST", f"http://127.0.0.1:{port}/echo", json={"n": 1})
-        finally:
-            await buyer_client.aclose()
-        assert first.status_code == 200
-
-        impostor = AIBankCredential(account_id=buyer.account_id, api_key="wrong-key")
+        impostor = AIBankSubAccount(account_id="acc_" + "0" * 32)
         impostor_client = protocol.build_buyer_client(impostor)
         try:
-            with pytest.raises(Exception, match="invalid_credential"):
+            with pytest.raises(AIBankError, match="account_not_found"):
                 await impostor_client.request("POST", f"http://127.0.0.1:{port}/echo", json={"n": 2})
         finally:
             await impostor_client.aclose()

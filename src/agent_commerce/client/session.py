@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 def build_buyer_client(protocol: PaymentProtocol, signer: PayerCredential) -> BuyerClient:
     # `protocol` está tipado por el ABC base (`WalletSigner` únicamente) --
     # solo `AP2Protocol.build_buyer_client` de verdad acepta el `PayerCredential`
-    # completo (`WalletSigner | AIBankCredential`, ver `protocols/base.py`).
+    # completo (`WalletSigner | AIBankSubAccount | ...`, ver `protocols/base.py`).
     # La correspondencia correcta protocolo<->credencial la garantizan las
     # factories (`payments/factory.py`), no algo que mypy pueda probar acá
     # sin generics -- mismo criterio que otros `type: ignore` puntuales ya

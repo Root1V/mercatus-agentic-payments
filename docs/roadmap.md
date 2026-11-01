@@ -812,3 +812,107 @@ con `demo`, que corre vendedor y comprador en el mismo proceso.
 Verificado: 7 tests nuevos en `tests/cli/test_demo_mandate.py` (límite concedido menor al pedido,
 revocación, rechazo del titular, concesión mayor a lo pedido, y las tres validaciones de opciones).
 `demo` en x402, AP2 sobre x402 y AP2 sobre AIBank modelo A, sin regresión.
+
+### MockAIBank alineado con la API real de Aerarium (AE-02/AE-03)
+
+AIBank se renombró a **Aerarium**, y su equipo abrió un canal compartido (fuera del repo) donde
+señaló que el mock no autenticaba como la API real. Se verificó contra su repo público
+(Root1V/aerarium-agentic-banking, `86731d1`), levantando su sandbox localmente y corriendo su
+cliente de referencia en los dos modelos, y donde los docs no alcanzaban, leyendo su código
+(`services/mercatus/handlers.go`, `services/bff/consent.go`, `services/oauth/consent.go`).
+
+**Nuevo puerto `payments/aibank_api.py`** (`AIBankApi`, async), con la forma exacta de la API de
+socio: `open_account`, `authorize`, `capture`, `get_authorization` (con `expected_amount`/
+`expected_payee_account_id`), `refund` (total o parcial), `create_consent_request`,
+`get_consent_request`, `get_mandate`. Aparte, `HolderChannel` (solo sandbox: crear titular de
+prueba, aprobar, rechazar, revocar), con su propio vocabulario (`limit_above_requested`,
+`already_resolved`, `expired`, `not_found`), como el BFF real. Montos en **micras enteras**:
+`usd_to_micros` rechaza, sin redondear, más de seis decimales. Errores con código estable y su
+HTTP real (`AIBankError.code`/`.status`).
+
+**`MockAIBank` reescrito** como implementación de ese puerto:
+- Se autentica la **integración**, no cada cuenta (`register_integration` → `client`), con scopes
+  (`insufficient_scope`). `AIBankCredential(account_id, api_key)` desapareció:
+  `AIBankSubAccount(account_id)` es el modelo A y `AIBankMandateCredential` el B, sin secreto.
+- **Visibilidad real**: el receptor siempre es de la integración (también en el modelo B). Una
+  autorización es operable si cualquiera de sus cuentas es nuestra, y lo ajeno responde como
+  inexistente.
+- **Retener al autorizar**, no al capturar; las retenciones vencidas vuelven solas.
+- Vocabulario real: se fueron `authorization_belongs_to_another_account`, `missing_credential`,
+  `only_the_payee_can_refund` y `cannot_*_from_status_*`. Se sumaron `idempotency_key_reused`,
+  `already_refunded` (capturar algo liberado o reembolsado, no documentado en el doc 11), etc.
+- Reloj inyectable, `freeze_account` y `available_balance`: controles de sandbox para tests.
+
+**Protocolo**: la `Idempotency-Key` es el `cart_id` (antes un uuid por intento, que habría cobrado
+dos veces en un reintento). El vendedor verifica con `expected_*` y el banco compara. La factory
+ya no inventa cuentas: abre la sub-cuenta del rol (idempotente por `owner_reference`) o usa la de
+`Settings`. Se eliminaron `AGENT_COMMERCE_AIBANK_{BUYER,SELLER}_API_KEY`.
+
+**Dashboard**: se quitó la API key del modelo A (migración `0007` elimina
+`wallet_settings.aibank_api_key`). Una sub-cuenta inventada da `account_not_found` al pagar, como
+en el banco real. El simulador del modelo B abre un titular de prueba en vez de pedir un `acc_`
+inventado, y lo pedido en cada solicitud lo guarda el dashboard, porque la API no lo devuelve.
+
+**Tests de contrato** (`tests/payments/test_aibank_contract.py`): los escenarios 1-19 del doc 11
+y los del modelo B del doc 13, escritos SOLO contra el puerto, con un fixture parametrizado por
+implementación (`tests/payments/conftest.py`). El día del cliente HTTP se agrega el parámetro
+`sandbox` y los mismos tests corren contra el banco real. Lo que necesita controles del mock
+(vencimientos, otra integración, congelar, scopes) está en `test_mock_aibank.py`.
+
+Verificado: 214 tests (2 skip de testnet), `ruff`/`mypy` limpios, `tsc`/`eslint`/`vite build` OK.
+Migración `0007` en Postgres real: sube, baja, vuelve a subir y `alembic check` queda limpio. En el
+navegador, contra el dashboard real: modelo A con sub-cuenta abierta por el dashboard (recibo
+"ómnibus", `acc_` de 32 hex); modelo B con 3 pagos sobre la cuenta del titular y el 4.º rechazado
+por tope, resumen en $0.003 de $0.003, revocación, y conceder de más rechazado con el mensaje
+correcto.
+
+**Siguiente**: el cliente HTTP (`AIBankApi` sobre `httpx`, token cacheado y renovado, reintento
+solo de `429`/`503` respetando `Retry-After`) y el parámetro `sandbox` del fixture. Compromiso en
+el canal: viernes 30/10 (M-01).
+
+### Cliente HTTP contra el sandbox real de Aerarium
+
+`payments/aibank_http.py`: `AIBankHttpApi` (la API de socio) y `AIBankHttpHolderChannel` (el canal del
+titular del sandbox), las implementaciones HTTP del mismo puerto que `MockAIBank`. Se activa con
+`AGENT_COMMERCE_AIBANK_BASE_URL` + `_CLIENT_ID` + `_CLIENT_SECRET` (la credencial de la INTEGRACIÓN), y
+para el modelo B en pruebas `_HOLDER_URL` (y `_DEV_KEY` si el sandbox está alojado). Sin
+`_BASE_URL` todo sigue usando el mock. `AIBANK_SANDBOX=false` deja de mandar saldo inicial al abrir
+cuentas, que producción rechaza.
+
+- **Token** `client_credentials` cacheado; se renueva un minuto antes de vencer, y una vez más ante un
+  `401` ("token expirado" es la señal de pedir otro).
+- **Reintentos** solo de `429`/`503`, respetando `Retry-After`, con la misma `Idempotency-Key`.
+- **Ids**: todo `account_id` de la API de socio tiene que traer `acc_`. El canal del titular usa UUID, y
+  nunca se cruzan los ids de un canal al otro (AE-06; el mock también separa los dos espacios).
+- **AE-08**: `already_refunded` se traduce a `authorization_not_capturable` hasta que el sandbox tenga
+  el PR #12 de Aerarium. El mock ya adoptó el nombre nuevo, y repetir un reembolso completo devuelve
+  `200` con `refunded: 0`.
+- **Un cliente por event loop**: el vendedor (uvicorn en su propio hilo, en la demo y en el dashboard)
+  y el comprador comparten la instancia, y un `httpx.AsyncClient` queda atado a su loop.
+- La captura devuelve solo `{id, status, settled_at}`, así que se completa con un `GET`.
+
+**Verificado contra el sandbox real** (su `main` `774aa8f`, levantado local): los tests de contrato
+del puerto corren con `-k sandbox` (fixture parametrizado `mock`/`sandbox`, que se salta sin
+credenciales en el entorno). Pasan 28 de 30. Los 2 restantes están marcados `xfail` explícitos, por
+comportamientos del banco reportados en el canal:
+1. Capturar algo cobrado y devuelto da `200 refunded` (el PR #12 lo cambia a `409`).
+2. **Error del banco**: un pago del modelo B sin saldo responde `503 service_unavailable` en vez de
+   `402 insufficient_funds` (el modelo A sí da `402`).
+
+La demo de la CLI corrió de punta a punta contra el sandbox en los dos modelos (`red: aibank:sandbox`).
+Ejecutar los tests de contrato contra el sandbox:
+
+```bash
+AGENT_COMMERCE_AIBANK_BASE_URL=http://localhost:28081 AGENT_COMMERCE_AIBANK_HOLDER_URL=http://localhost:28080 \
+AGENT_COMMERCE_AIBANK_CLIENT_ID=mercatus_sandbox AGENT_COMMERCE_AIBANK_CLIENT_SECRET=... \
+uv run pytest tests/payments/test_aibank_contract.py -k sandbox
+```
+
+10 tests de transporte en `tests/payments/test_aibank_http.py` (`httpx.MockTransport`): token cacheado,
+renovación ante `401`, reintento de `429` con la misma clave, abandono tras el límite, errores
+definitivos sin reintento, replay, traducción de `already_refunded` y validación de `acc_`.
+
+**Siguiente (AE-10, compromiso 13/11)**: identidad del agente. Registrar cada agente con su clave
+Ed25519 (`POST /v1/agents`), mandatos atados a un agente, `agent_id` + `intent` en cada pago, y pagos
+firmados con RFC 9421.
+

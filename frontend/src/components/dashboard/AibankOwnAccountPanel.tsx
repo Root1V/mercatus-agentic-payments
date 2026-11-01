@@ -56,6 +56,11 @@ export function AibankOwnAccountPanel() {
   );
 }
 
+/** Un tope que puede no existir: el banco permite permisos sin tope. */
+function formatLimit(amount: string | null): string {
+  return amount === null ? "sin tope" : formatUsd(amount);
+}
+
 function MandateSummary({ mandate, onRequestNew }: { mandate: AibankMandate; onRequestNew: () => void }) {
   const revoke = useSimulateMandateRevocation();
   const total = Number(mandate.max_total_usd);
@@ -81,7 +86,7 @@ function MandateSummary({ mandate, onRequestNew }: { mandate: AibankMandate; onR
             <span className="text-muted-foreground">Consumido del permiso</span>
             <span>
               <span className="font-medium text-foreground">{formatUsd(mandate.consumed_usd)}</span>
-              <span className="text-muted-foreground"> de {formatUsd(mandate.max_total_usd)}</span>
+              <span className="text-muted-foreground"> de {formatLimit(mandate.max_total_usd)}</span>
             </span>
           </div>
           <div
@@ -95,8 +100,8 @@ function MandateSummary({ mandate, onRequestNew }: { mandate: AibankMandate; onR
             <div className="h-full rounded-full bg-primary transition-[width] motion-reduce:transition-none" style={{ width: `${consumedPct}%` }} />
           </div>
           <p className="text-xs text-muted-foreground tabular-nums">
-            Quedan <span className="text-foreground">{formatUsd(mandate.remaining_usd)}</span> · máximo{" "}
-            {formatUsd(mandate.max_per_operation_usd)} por pago · vence {formatTimestamp(mandate.expires_at)}
+            Quedan <span className="text-foreground">{formatLimit(mandate.remaining_usd)}</span> · máximo{" "}
+            {formatLimit(mandate.max_per_operation_usd)} por pago · vence {formatTimestamp(mandate.expires_at)}
           </p>
         </div>
       </div>
@@ -249,6 +254,10 @@ function ConnectFlow({ onCancel }: { onCancel?: () => void }) {
     return <FlowFailure message="El titular rechazó el permiso." onRetry={reset} />;
   }
 
+  if (consent.data.status === "expired") {
+    return <FlowFailure message="La solicitud venció sin respuesta (vive una hora)." onRetry={reset} />;
+  }
+
   if (consent.data.status === "approved") {
     if (activate.isError) {
       return <FlowFailure message={apiErrorMessage(activate.error)} onRetry={reset} />;
@@ -280,7 +289,7 @@ function PendingConsent({ request, onCancel }: { request: ConsentRequest; onCanc
         </div>
         <p className="text-xs text-muted-foreground">
           Lo abre en la app de AIBank, se autentica con su dispositivo y elige desde qué cuenta concede hasta{" "}
-          {formatUsd(request.max_total_usd)} ({formatUsd(request.max_per_operation_usd)} por pago). Puede conceder
+          {formatLimit(request.max_total_usd)} ({formatLimit(request.max_per_operation_usd)} por pago). Puede conceder
           menos, nunca más. Vence {formatTimestamp(request.expires_at)}.
         </p>
         <p className="flex items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
@@ -300,22 +309,15 @@ function PendingConsent({ request, onCancel }: { request: ConsentRequest; onCanc
 function ApprovalSimulator({ request }: { request: ConsentRequest }) {
   const approve = useSimulateTitularApproval(request.consent_request_id);
   const reject = useSimulateTitularRejection(request.consent_request_id);
-  const [accountId, setAccountId] = useState(() => `acc_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`);
   const [grantedTotal, setGrantedTotal] = useState("");
   const busy = approve.isPending || reject.isPending;
 
   return (
     <TitularSimulator>
+      <p className="text-xs text-muted-foreground">
+        Aprobar abre la cuenta de un titular de prueba con $10 y concede el permiso sobre ella.
+      </p>
       <div className="grid grid-cols-2 gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sim-account">Cuenta elegida</Label>
-          <Input
-            id="sim-account"
-            className="font-mono"
-            value={accountId}
-            onChange={(e) => setAccountId(e.target.value)}
-          />
-        </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sim-total">Total concedido (USD)</Label>
           <Input
@@ -323,7 +325,7 @@ function ApprovalSimulator({ request }: { request: ConsentRequest }) {
             type="number"
             min="0.000001"
             step="any"
-            placeholder={request.max_total_usd}
+            placeholder={request.max_total_usd ?? undefined}
             value={grantedTotal}
             onChange={(e) => setGrantedTotal(e.target.value)}
           />
@@ -337,10 +339,8 @@ function ApprovalSimulator({ request }: { request: ConsentRequest }) {
           type="button"
           size="sm"
           variant="outline"
-          disabled={busy || !accountId.trim()}
-          onClick={() =>
-            approve.mutate({ account_id: accountId.trim(), max_total_usd: grantedTotal || undefined })
-          }
+          disabled={busy}
+          onClick={() => approve.mutate({ max_total_usd: grantedTotal || undefined })}
         >
           {approve.isPending ? "Aprobando…" : "Aprobar como titular"}
         </Button>

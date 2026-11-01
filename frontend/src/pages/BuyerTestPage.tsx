@@ -248,7 +248,6 @@ function WalletSettingsForm({
     circle_entity_secret: "",
     circle_wallet_id: settings?.circle_wallet_id ?? "",
     aibank_account_id: settings?.aibank_account_id ?? "",
-    aibank_api_key: "",
     aibank_model: settings?.aibank_model ?? ("omnibus" as AibankModel),
   });
 
@@ -262,7 +261,6 @@ function WalletSettingsForm({
       // El modelo B no edita la cuenta ómnibus: se conserva tal cual para
       // poder volver a ella sin reescribirla.
       aibank_account_id: form.backend === "aibank" ? form.aibank_account_id || null : null,
-      aibank_api_key: form.aibank_api_key ? form.aibank_api_key : undefined,
       aibank_model: form.backend === "aibank" ? form.aibank_model : undefined,
     });
   }
@@ -341,28 +339,21 @@ function WalletSettingsForm({
           {form.aibank_model === "omnibus" && (
             <>
               <p className="text-xs text-muted-foreground">
-                Modelo ómnibus: una sub-cuenta del agente bajo la cuenta maestra de Mercatus.
+                Modelo ómnibus: una sub-cuenta del agente bajo la cuenta maestra de Mercatus. No lleva clave
+                propia: ante el banco se autentica Mercatus, en nombre de todos sus agentes.
               </p>
               <div className="flex flex-col gap-1.5">
-                <Label>Cuenta de AIBank (opcional)</Label>
+                <Label htmlFor="aibank-account">Sub-cuenta del agente (opcional)</Label>
                 <Input
-                  placeholder="se genera automático si lo dejás vacío"
+                  id="aibank-account"
+                  className="font-mono"
+                  placeholder="acc_… · vacío usa una que el dashboard abre en el banco"
                   value={form.aibank_account_id}
                   onChange={(e) => setForm({ ...form, aibank_account_id: e.target.value })}
                 />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>
-                  {settings?.has_aibank_api_key
-                    ? "API key de AIBank (dejar vacío para no cambiarla)"
-                    : "API key de AIBank (opcional)"}
-                </Label>
-                <Input
-                  type="password"
-                  placeholder={settings?.has_aibank_api_key ? "••••••••" : "se genera automático si lo dejás vacío"}
-                  value={form.aibank_api_key}
-                  onChange={(e) => setForm({ ...form, aibank_api_key: e.target.value })}
-                />
+                <p className="text-xs text-muted-foreground">
+                  Tiene que existir en el banco: una cuenta inventada se rechaza al pagar.
+                </p>
               </div>
             </>
           )}

@@ -2,7 +2,8 @@
 // con el flujo de `13-spec-modelos-a-y-b.md` §3. Importes en USD como
 // string decimal, tal como los devuelve el backend.
 
-export type ConsentRequestStatus = "pending" | "approved" | "rejected";
+// "expired": pasó la hora de vida sin que el titular decidiera.
+export type ConsentRequestStatus = "pending" | "approved" | "rejected" | "expired";
 
 export interface ConsentRequest {
   consent_request_id: string;
@@ -10,9 +11,11 @@ export interface ConsentRequest {
   handoff_code: string;
   status: ConsentRequestStatus;
   currency: string;
-  max_per_operation_usd: string;
-  max_total_usd: string;
-  purpose: string;
+  // Lo pedido lo guarda el dashboard (el banco no lo devuelve al consultar):
+  // null si la solicitud se pidió antes de un reinicio.
+  max_per_operation_usd: string | null;
+  max_total_usd: string | null;
+  purpose: string | null;
   expires_at: string;
   // Solo presentes una vez aprobada: la cuenta la elige el titular, no
   // Mercatus.
@@ -27,7 +30,8 @@ export interface CreateConsentRequestInput {
 }
 
 export interface SimulateApprovalInput {
-  account_id: string;
+  // La cuenta no se elige acá: el simulador abre la de un titular de prueba
+  // (con saldo), como lo haría una persona real en la app del banco.
   // undefined = conceder exactamente lo pedido.
   max_per_operation_usd?: string;
   max_total_usd?: string;
@@ -40,12 +44,13 @@ export interface AibankMandate {
   account_id: string;
   currency: string;
   status: MandateStatus;
-  max_per_operation_usd: string;
-  max_total_usd: string;
+  // null = sin tope (el titular puede conceder un permiso sin tope si no se pidió uno).
+  max_per_operation_usd: string | null;
+  max_total_usd: string | null;
   // Se deriva de las autorizaciones vivas: una retención sin capturar ya
   // consume el tope, y un reembolso lo libera.
   consumed_usd: string;
-  remaining_usd: string;
+  remaining_usd: string | null;
   expires_at: string;
 }
 
