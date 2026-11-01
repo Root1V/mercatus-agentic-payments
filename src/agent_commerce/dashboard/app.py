@@ -36,7 +36,7 @@ import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -66,7 +66,11 @@ from agent_commerce.payments.aibank_api import (
     micros_to_usd,
     usd_to_micros,
 )
-from agent_commerce.payments.aibank_credential import AIBankMandateCredential, AIBankSubAccount
+from agent_commerce.payments.aibank_credential import (
+    AIBankMandateCredential,
+    AIBankSubAccount,
+    new_intent_reference,
+)
 from agent_commerce.payments.factory import build_wallet_signer, get_payment_protocol
 from agent_commerce.payments.protocols.ap2_protocol import AP2Protocol
 from agent_commerce.payments.wallets.circle_wallet import CircleWalletSigner
@@ -247,6 +251,14 @@ def _mandate_to_dict(mandate: Mandate) -> dict[str, Any]:
         "remaining_usd": _usd_or_none(mandate.remaining),
         "expires_at": mandate.expires_at.isoformat(),
     }
+
+
+def _with_intent_reference(signer: PayerCredential, reference: str) -> PayerCredential:
+    """La misma credencial, para los pagos de UNA tarea (`intent.reference`).
+    Solo aplica a AIBank: los rieles cripto no tienen intención."""
+    if isinstance(signer, (AIBankSubAccount, AIBankMandateCredential)):
+        return replace(signer, intent_reference=reference)
+    return signer
 
 
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
@@ -439,9 +451,12 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         if settings.aibank_seller_account_id
         else ap2_protocol.provision_aibank_account("dashboard_seller")
     )
-    # Sub-cuenta del comprador (modelo A) cuando "Configurar wallet" no fija
-    # una: se abre una vez y se reusa (`open_account` es idempotente).
-    aibank_default_buyer = ap2_protocol.provision_aibank_account("dashboard_buyer")
+    # El agente comprador del dashboard, registrado en el banco con su clave
+    # (contrato 1.1, AE-10), y su sub-cuenta del modelo A atada a él. Es
+    # también el agente al que se le piden los permisos del modelo B.
+    aibank_default_buyer = ap2_protocol.provision_aibank_buyer(agent_name="Agente comprador del dashboard de Mercatus")
+    aibank_buyer_agent = aibank_default_buyer.agent
+    assert aibank_buyer_agent is not None
     # Estado del simulador del modelo B, solo en memoria (igual que el banco
     # simulado): lo pedido en cada solicitud y el titular de prueba de cada
     # mandato, para poder revocarlo después "desde su app".
@@ -607,6 +622,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                     wallet_signer_holder.signer = AIBankMandateCredential(
                         mandate_id=settings_row.aibank_mandate_id,
                         account_id=settings_row.aibank_mandate_account_id,
+                        agent=aibank_buyer_agent,
                     )
                     wallet_signer_holder.key = key
             else:
@@ -615,7 +631,9 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
                 )
                 key = ("aibank", account_id, "")
                 if wallet_signer_holder.key != key:
-                    wallet_signer_holder.signer = AIBankSubAccount(account_id=account_id)
+                    # Una sub-cuenta fijada a mano solo paga si está atada a
+                    # este agente; si no, el banco responde `account_agent_scope`.
+                    wallet_signer_holder.signer = AIBankSubAccount(account_id=account_id, agent=aibank_buyer_agent)
                     wallet_signer_holder.key = key
         elif backend == "circle":
             if settings_row is None or not (
@@ -790,7 +808,10 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             protocols=[payload.protocol],
         )
         catalog = InMemoryServiceRegistry([listing])
-        buyer_signer = _get_buyer_signer(db, protocol=payload.protocol)
+        # Una llamada de prueba no tiene tarea: su propia referencia (AE-10, M-11).
+        buyer_signer = _with_intent_reference(
+            _get_buyer_signer(db, protocol=payload.protocol), new_intent_reference("test-call")
+        )
 
         started = time.monotonic()
         try:
@@ -999,6 +1020,7 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, f"Los topes van en dólares con hasta seis decimales: {exc}") from exc
         try:
             request = await aibank.create_consent_request(
+                agent_id=aibank_buyer_agent.agent_id,
                 purpose=requested.purpose,
                 max_per_operation=requested.max_per_operation,
                 max_total=requested.max_total,
@@ -1212,7 +1234,10 @@ def build_dashboard_app(settings: Settings | None = None) -> FastAPI:
         store.add_message(conversation_id=conversation.id, role="user", content=payload.content)
         prompt = _build_prompt_with_history(prior_messages, payload.content)
 
-        buyer_signer = _get_buyer_signer(db, protocol=agent.protocol)
+        # La tarea es la conversación: todos sus pagos comparten la referencia (AE-10).
+        buyer_signer = _with_intent_reference(
+            _get_buyer_signer(db, protocol=agent.protocol), f"conversation-{conversation.id}"
+        )
         async with PayingAgent(
             protocol=protocols[agent.protocol], signer=buyer_signer, catalog=_agent_catalog(agent.protocol)
         ) as paying_agent:

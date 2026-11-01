@@ -18,6 +18,12 @@ const AIBANK_ERROR_EXPLANATIONS: Record<string, string> = {
   consent_request_already_resolved: "El titular ya decidió sobre esta solicitud.",
   account_not_found: "Esa cuenta no existe en el banco (o no es de Mercatus). Dejá la sub-cuenta vacía para usar una propia.",
   account_frozen: "La cuenta está congelada por un control del banco y no admite movimientos.",
+  // Contrato 1.1: cada pago va firmado por el agente dueño de la cuenta o del permiso.
+  account_agent_scope:
+    "Esa sub-cuenta no es de este agente: solo puede pagar desde ella el agente al que está atada. Dejá la sub-cuenta vacía para usar la del dashboard.",
+  mandate_agent_scope: "El permiso del titular es de otro agente: pedí un permiso nuevo para este.",
+  agent_signature_invalid: "El banco no reconoce la firma del agente (clave desconocida, retirada o agente dado de baja).",
+  agent_revoked: "El agente está dado de baja en el banco.",
   malformed_request: "Faltan datos en la solicitud: el propósito es obligatorio.",
   // Canal del titular (la app del banco), con su propio vocabulario.
   limit_above_requested: "El titular puede conceder menos de lo pedido, nunca más.",

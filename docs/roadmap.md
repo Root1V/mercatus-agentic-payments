@@ -916,3 +916,44 @@ definitivos sin reintento, replay, traducción de `already_refunded` y validaci�
 Ed25519 (`POST /v1/agents`), mandatos atados a un agente, `agent_id` + `intent` en cada pago, y pagos
 firmados con RFC 9421.
 
+### Identidad del agente: contrato 1.1 de Aerarium (AE-10, AE-11, AE-14)
+
+Desde la 1.1, el banco sabe **qué agente** paga y **para qué**. Lo implementado:
+
+- **Firma RFC 9421** (`payments/aibank_signing.py`): Ed25519 sobre `@method`, `@path` y
+  `content-digest` (SHA-256 del cuerpo exacto), con `keyid` = `key_…` (AE-11) y `created` (el banco
+  rechaza más de 5 minutos). Produce la misma base de firma, byte a byte, que `services/agents/httpsig.go`
+  de Aerarium; el verificador del mock es el espejo del suyo. El cuerpo lo arma una sola función
+  (`authorization_body`), compartida por el mock y el cliente HTTP, porque se firman esos bytes.
+- **Puerto**: `register_agent`, `get_agent`, `revoke_agent`, `add_agent_key`, `retire_agent_key`. Además:
+  - `open_account(agent_id=...)` ata la sub-cuenta a un agente; sin agente, solo cobra.
+  - `create_consent_request(agent_id=...)` pide un permiso que sirve solo a ese agente.
+  - `authorize(agent=..., intent=Intent(reference, description))` va firmado.
+- **Mock**: verifica la firma Ed25519 de verdad y aplica los mismos chequeos que el banco:
+  - `agent_signature_invalid` (clave desconocida, retirada, vencida o de un agente dado de baja, o
+    `agent_id` que no es el dueño de la clave);
+  - `account_agent_scope` y `mandate_agent_scope`;
+  - rotación con ventana de 7 días, `agent_last_key` y `account_agent_conflict`.
+- **Cliente HTTP**: vuelve a firmar en cada reintento (`created` vence), con la misma `Idempotency-Key`.
+- **AP2**: la credencial del comprador lleva su `AgentIdentity` y `intent_reference`:
+  - la conversación del playground (`conversation-<id>`);
+  - una referencia nueva por llamada en "Probar comprador" (`test-call-…`);
+  - una por corrida en la demo.
+
+  `intent.description` sale del carrito (comercio y ítem), nunca del contenido que procesa el agente.
+- **AE-14**: recapturar algo cobrado y luego devuelto es `200` con el `settled_at` original y el estado de
+  hoy. `authorization_not_capturable` queda solo para lo que venció y se liberó sin cobrarse.
+
+**Verificado contra el sandbox real** (`main` de Aerarium en `3a9048f`, contrato 1.1): **41 de 41
+escenarios de contrato** con `-k sandbox`, incluidos 11 nuevos de la 1.1 (firma de otro agente, clave
+nunca registrada, `agent_id` que no es el dueño de la clave, intención inválida, permiso sin agente,
+permiso de otro agente, rotación sin baja, agente dado de baja, cuenta de un solo agente, vendedor que
+cobra pero no paga), y sin ningún `xfail`: el `503` de M-07 ya es `402` en su `main`. La demo de la CLI
+pagó con firma en los dos modelos contra el sandbox.
+
+**Pendiente antes de producción** (AE-11): las claves privadas viven en memoria; cada arranque registra
+un agente nuevo con una sub-cuenta nombrada por él. Falta persistirlas cifradas en nuestra base de datos
+(lo comprometido en M-11 para el sandbox) y, antes de producción, moverlas a un gestor de claves
+(KMS/HSM), que Aerarium exigirá en el contrato. Hasta entonces, `AGENT_COMMERCE_AIBANK_BUYER_ACCOUNT_ID`
+se rechaza con un mensaje claro: no hay forma de firmar por el agente dueño de esa cuenta.
+

@@ -27,10 +27,16 @@ son `POST /dev/holders` y las rutas del BFF, con su propio vocabulario.
 
 from __future__ import annotations
 
+import json
+import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .aibank_signing import AgentIdentity
 
 MICROS_PER_USD = 1_000_000
 
@@ -58,7 +64,8 @@ HTTP_STATUS_BY_CODE: dict[str, int] = {
     "mandate_not_found": 404,
     "idempotency_key_reused": 409,
     "authorization_expired": 409,
-    # AE-08: capturar algo que ya no está vivo (liberado, o cobrado y devuelto).
+    # AE-08/AE-14: capturar algo que venció y se liberó sin cobrarse nunca. Lo
+    # cobrado y devuelto NO es esto: recapturarlo da `200` con su `settled_at`.
     # Antes se llamaba `already_refunded` -- ver `LEGACY_CODE_RENAMES`.
     "authorization_not_capturable": 409,
     "nothing_to_refund": 409,
@@ -72,6 +79,15 @@ HTTP_STATUS_BY_CODE: dict[str, int] = {
     "rate_limited": 429,
     "server_error": 500,
     "service_unavailable": 503,
+    # Contrato 1.1 -- identidad del agente (AE-10/AE-11).
+    "agent_signature_invalid": 401,
+    "mandate_agent_scope": 403,
+    "account_agent_scope": 403,
+    "agent_not_found": 404,
+    "agent_revoked": 409,
+    "agent_key_in_use": 409,
+    "agent_last_key": 409,
+    "account_agent_conflict": 409,
 }
 
 # Códigos que la API renombró: el cliente HTTP traduce el viejo al nuevo para
@@ -130,11 +146,76 @@ def usd_to_micros(value: Decimal | str) -> int:
     return int(micros)
 
 
+def authorization_body(
+    *,
+    payer_account_id: str,
+    payee_account_id: str,
+    amount: int,
+    currency: str,
+    mandate_id: str | None,
+    agent: AgentIdentity,
+    intent: Intent,
+) -> bytes:
+    """El cuerpo exacto de `POST /v1/authorizations` (1.1). Se firma ESTOS
+    bytes (`Content-Digest`), así que el cliente HTTP y el mock lo arman con la
+    misma función: cualquier diferencia de serialización rompería la firma."""
+    body: dict[str, object] = {
+        "payer_account_id": payer_account_id,
+        "payee_account_id": payee_account_id,
+        "amount": amount,
+        "currency": currency,
+        "agent_id": agent.agent_id,
+        "intent": {"reference": intent.reference, "description": intent.description},
+    }
+    if mandate_id is not None:
+        body["mandate_id"] = mandate_id
+    return json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()
+
+
 def micros_to_usd(micros: int) -> Decimal:
     """`1000` -> `Decimal("0.001")`, exacto (sin pasar por float) y sin
     notación exponencial (`10000000` -> `Decimal("10")`, no `1E+1`)."""
     value = Decimal(micros).scaleb(-6).normalize()
     return value.quantize(Decimal(1)) if value == value.to_integral_value() else value
+
+
+@dataclass(frozen=True)
+class Intent:
+    """Por qué se hizo un pago (AE-10). `reference` es la tarea que el cliente
+    le dio al agente -- varios pagos de una tarea la comparten --; `description`
+    es qué se compró, en texto plano, y el titular la lee tal cual en su
+    historial: nunca datos personales de terceros."""
+
+    reference: str
+    description: str
+
+    def problem(self) -> str | None:
+        """Lo mismo que valida el banco (`services/agents/intents.go`)."""
+        reference, description = self.reference.strip(), self.description.strip()
+        if not reference or len(reference) > 128 or not description or len(description) > 140:
+            return "intent inválido: reference (1–128) y description (1–140, texto plano) son obligatorios"
+        if any(unicodedata.category(c) == "Cc" for c in reference + description):
+            return "intent inválido: sin caracteres de control"
+        return None
+
+
+@dataclass(frozen=True)
+class AgentKey:
+    key_id: str
+    public_key: dict[str, str]  # JWK OKP/Ed25519
+    created_at: datetime
+    expires_at: datetime | None = None  # tras rotar: vale 7 días más, salvo retiro antes
+    retired_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class Agent:
+    agent_id: str
+    name: str  # el que ve el titular: tiene que reconocerlo
+    status: str  # "active" | "revoked"
+    keys: tuple[AgentKey, ...]
+    created_at: datetime
+    revoked_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +261,7 @@ class ConsentRequest:
     expires_at: datetime
     mandate_id: str | None = None  # solo si approved
     account_id: str | None = None  # la que eligió el titular, solo si approved
+    agent_id: str | None = None  # el agente al que se le pidió el permiso (1.1)
 
 
 @dataclass(frozen=True)
@@ -217,6 +299,27 @@ class AIBankApi(ABC):
     """La API de socio, autenticada como UNA integración."""
 
     @abstractmethod
+    async def register_agent(self, *, name: str, public_key: dict[str, str]) -> Agent:
+        """`POST /v1/agents`: el agente y su primera clave. `name` es el que ve
+        el titular al conceder un permiso y en su historial."""
+
+    @abstractmethod
+    async def get_agent(self, agent_id: str) -> Agent: ...
+
+    @abstractmethod
+    async def revoke_agent(self, agent_id: str) -> None:
+        """Baja: sus claves y sus permisos dejan de servir al momento."""
+
+    @abstractmethod
+    async def add_agent_key(self, agent_id: str, *, public_key: dict[str, str]) -> AgentKey:
+        """Rotación sin baja (AE-11): desde ahora valen las dos; las anteriores
+        vencen a los 7 días salvo que se retiren antes."""
+
+    @abstractmethod
+    async def retire_agent_key(self, agent_id: str, key_id: str) -> None:
+        """Retirar la última clave viva es `agent_last_key`."""
+
+    @abstractmethod
     async def open_account(
         self,
         *,
@@ -224,9 +327,12 @@ class AIBankApi(ABC):
         currency: str = "USD",
         display_name: str | None = None,
         initial_balance: int | None = None,
+        agent_id: str | None = None,
     ) -> Account:
         """Idempotente por `(owner_reference, currency)`. `initial_balance`
-        solo existe en el sandbox."""
+        solo existe en el sandbox. Con `agent_id`, la cuenta queda atada a ese
+        agente y solo él paga desde ella; sin él -- la de un vendedor -- cobra
+        pero no paga (1.1)."""
 
     @abstractmethod
     async def authorize(
@@ -236,9 +342,13 @@ class AIBankApi(ABC):
         payee_account_id: str,
         amount: int,
         idempotency_key: str,
+        agent: AgentIdentity,
+        intent: Intent,
         currency: str = "USD",
         mandate_id: str | None = None,
-    ) -> Authorization: ...
+    ) -> Authorization:
+        """Firmado por `agent` (RFC 9421, `aibank_signing.py`): el `agent_id`
+        del cuerpo tiene que ser el dueño de la clave que firma."""
 
     @abstractmethod
     async def capture(self, authorization_id: str) -> Authorization:
@@ -263,12 +373,15 @@ class AIBankApi(ABC):
     async def create_consent_request(
         self,
         *,
+        agent_id: str,
         purpose: str,
         currency: str = "USD",
         max_per_operation: int | None = None,
         max_total: int | None = None,
     ) -> ConsentRequest:
-        """Modelo B, paso 1: sin cuenta -- la elige el titular."""
+        """Modelo B, paso 1: sin cuenta -- la elige el titular. El permiso es
+        para UN agente (1.1): el titular ve su nombre, y ningún otro agente de
+        la plataforma puede usarlo."""
 
     @abstractmethod
     async def get_consent_request(self, consent_request_id: str) -> ConsentRequest:

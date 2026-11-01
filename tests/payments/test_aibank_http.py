@@ -11,8 +11,15 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from agent_commerce.payments.aibank_api import AIBankError
+from agent_commerce.payments.aibank_api import AIBankError, Intent
 from agent_commerce.payments.aibank_http import AIBankHttpApi
+from agent_commerce.payments.aibank_signing import (
+    AgentIdentity,
+    generate_agent_key,
+    public_jwk,
+    public_key_from_jwk,
+    verify_request,
+)
 
 _AUTH_RESPONSE = {
     "authorization_id": "auth_" + "a" * 32,
@@ -40,9 +47,17 @@ def _token(request: httpx.Request, issued: list[str]) -> httpx.Response:
     return httpx.Response(200, json={"access_token": issued[-1], "expires_in": 3600})
 
 
+_AGENT = AgentIdentity(agent_id="agt_" + "a" * 32, key_id="key_" + "b" * 32, private_key=generate_agent_key())
+
+
 async def _authorize(api: AIBankHttpApi):
     return await api.authorize(
-        payer_account_id="acc_" + "1" * 32, payee_account_id="acc_" + "2" * 32, amount=1_000, idempotency_key="cart_1"
+        payer_account_id="acc_" + "1" * 32,
+        payee_account_id="acc_" + "2" * 32,
+        amount=1_000,
+        idempotency_key="cart_1",
+        agent=_AGENT,
+        intent=Intent(reference="task-1", description="Text Summarizer: resumen"),
     )
 
 
@@ -191,3 +206,24 @@ async def test_a_refund_without_amount_sends_no_body() -> None:
     await api.refund("auth_" + "a" * 32, amount=300)
     assert bodies[0] == b""
     assert json.loads(bodies[1]) == {"amount": 300}
+
+
+async def test_each_attempt_is_signed_over_the_exact_body() -> None:
+    """La firma cubre el cuerpo exacto que viaja (RFC 9421 + `Content-Digest`)
+    y se recalcula en cada reintento -- `created` vence a los 5 minutos --,
+    siempre con la misma `Idempotency-Key`."""
+    public_key = public_key_from_jwk(public_jwk(_AGENT.private_key))
+    verified: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            return _token(request, [])
+        key_id = verify_request("POST", request.url.path, request.content, dict(request.headers), lambda _: public_key)
+        verified.append((key_id, request.headers["Idempotency-Key"]))
+        assert json.loads(request.content)["agent_id"] == _AGENT.agent_id
+        if len(verified) == 1:
+            return httpx.Response(503, json={"error": "service_unavailable"})
+        return httpx.Response(201, json=_AUTH_RESPONSE)
+
+    await _authorize(_api(handler))
+    assert verified == [(_AGENT.key_id, "cart_1")] * 2

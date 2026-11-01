@@ -40,17 +40,24 @@ async def test_07_an_uncaptured_hold_expires_and_the_money_returns() -> None:
     clock = _Clock()
     bank = MockAIBank(clock=clock)
     env = _env(bank)
-    payer, payee = await env.funded_account("payer", balance=5_000), await env.funded_account("payee")
-    authorization = await env.api.authorize(
+    payer, payee = (
+        await env.funded_account("payer", balance=5_000),
+        await env.funded_account("payee"),
+    )
+    authorization = await env.authorize(
         payer_account_id=payer, payee_account_id=payee, amount=1_000, idempotency_key="k"
     )
     assert bank.available_balance(payer) == 4_000  # retenido, no movido
 
     clock.now += AUTHORIZATION_TTL_SECONDS + 1
-    assert (await env.api.get_authorization(authorization.authorization_id)).status == "expired"
+    # Venció y el barrendero todavía no la liberó (AE-14).
     with pytest.raises(AIBankError, match="authorization_expired"):
         await env.api.capture(authorization.authorization_id)
+    # Ya liberada, sin cobrarse nunca: el dinero volvió al pagador.
+    assert (await env.api.get_authorization(authorization.authorization_id)).status == "expired"
     assert bank.available_balance(payer) == 5_000
+    with pytest.raises(AIBankError, match="authorization_not_capturable"):
+        await env.api.capture(authorization.authorization_id)
 
 
 async def test_13_another_integrations_account_looks_nonexistent() -> None:
@@ -58,12 +65,17 @@ async def test_13_another_integrations_account_looks_nonexistent() -> None:
     ours, theirs = _env(bank, "mercatus"), _env(bank, "otra_plataforma")
     payee = await ours.funded_account("payee")
     foreign = await theirs.funded_account("foreign")
-    authorization = await theirs.api.authorize(
-        payer_account_id=foreign, payee_account_id=await theirs.funded_account("x"), amount=1, idempotency_key="k"
+    authorization = await theirs.authorize(
+        payer_account_id=foreign,
+        payee_account_id=await theirs.funded_account("x"),
+        amount=1,
+        idempotency_key="k",
     )
 
     with pytest.raises(AIBankError, match="account_not_found"):
-        await ours.api.authorize(payer_account_id=foreign, payee_account_id=payee, amount=1, idempotency_key="k")
+        await ours.authorize(
+            payer_account_id=foreign, payee_account_id=payee, amount=1, idempotency_key="k"
+        )
     # Ni confirmar ni negar: una autorización ajena responde como inexistente.
     with pytest.raises(AIBankError, match="authorization_not_found"):
         await ours.api.get_authorization(authorization.authorization_id)
@@ -72,12 +84,16 @@ async def test_13_another_integrations_account_looks_nonexistent() -> None:
 async def test_the_same_idempotency_key_in_two_integrations_are_different_payments() -> None:
     bank = MockAIBank()
     a, b = _env(bank, "a"), _env(bank, "b")
-    first = await a.api.authorize(
-        payer_account_id=await a.funded_account(), payee_account_id=await a.funded_account(), amount=1,
+    first = await a.authorize(
+        payer_account_id=await a.funded_account(),
+        payee_account_id=await a.funded_account(),
+        amount=1,
         idempotency_key="cart_1",
     )
-    second = await b.api.authorize(
-        payer_account_id=await b.funded_account(), payee_account_id=await b.funded_account(), amount=1,
+    second = await b.authorize(
+        payer_account_id=await b.funded_account(),
+        payee_account_id=await b.funded_account(),
+        amount=1,
         idempotency_key="cart_1",
     )
     assert not second.replayed
@@ -91,7 +107,14 @@ async def test_14_read_only_token_cannot_authorize() -> None:
     secret = bank.register_integration("mercatus_lectura", scopes=[SCOPE_PAYMENTS_READ])
     reader = bank.client("mercatus_lectura", secret)
     with pytest.raises(AIBankError, match="insufficient_scope") as excinfo:
-        await reader.authorize(payer_account_id=payer, payee_account_id=payee, amount=1, idempotency_key="k")
+        await reader.authorize(
+            payer_account_id=payer,
+            payee_account_id=payee,
+            amount=1,
+            idempotency_key="k",
+            agent=await writer.default_agent(),
+            intent=writer.intent(),
+        )
     assert excinfo.value.status == 403
 
 
@@ -109,21 +132,29 @@ async def test_frozen_account_rejects_movements() -> None:
     payer, payee = await env.funded_account(), await env.funded_account()
     bank.freeze_account(payer)
     with pytest.raises(AIBankError, match="account_frozen"):
-        await env.api.authorize(payer_account_id=payer, payee_account_id=payee, amount=1, idempotency_key="k")
+        await env.authorize(
+            payer_account_id=payer, payee_account_id=payee, amount=1, idempotency_key="k"
+        )
 
 
 async def test_a_pending_consent_request_expires_after_an_hour() -> None:
     clock = _Clock()
     bank = MockAIBank(clock=clock)
     env = _env(bank)
-    request = await env.api.create_consent_request(purpose="x", max_total=1_000)
+    request = await env.api.create_consent_request(
+        agent_id=(await env.default_agent()).agent_id, purpose="x", max_total=1_000
+    )
     clock.now += CONSENT_REQUEST_TTL_SECONDS + 1
 
     assert (await env.api.get_consent_request(request.consent_request_id)).status == "expired"
     holder = await env.holder()
     with pytest.raises(AIBankError, match="expired"):
         await env.holders.approve(
-            holder, request.handoff_code, account_id=holder.account_id, max_per_operation=None, max_total=1_000
+            holder,
+            request.handoff_code,
+            account_id=holder.account_id,
+            max_per_operation=None,
+            max_total=1_000,
         )
 
 
@@ -137,7 +168,7 @@ async def test_an_expired_mandate_stops_paying() -> None:
 
     assert (await env.api.get_mandate(mandate.mandate_id)).status == "expired"
     with pytest.raises(AIBankError, match="mandate_expired"):
-        await env.api.authorize(
+        await env.authorize(
             payer_account_id=mandate.account_id,
             payee_account_id=payee,
             amount=1_000,
@@ -153,7 +184,7 @@ async def test_another_integration_cannot_see_or_use_our_mandate() -> None:
     with pytest.raises(AIBankError, match="mandate_not_found"):
         await theirs.api.get_mandate(mandate.mandate_id)
     with pytest.raises(AIBankError, match="mandate_not_found"):
-        await theirs.api.authorize(
+        await theirs.authorize(
             payer_account_id=mandate.account_id,
             payee_account_id=await theirs.funded_account(),
             amount=1_000,
@@ -176,6 +207,8 @@ def test_usd_to_micros_rejects_instead_of_rounding(usd: str) -> None:
         usd_to_micros(usd)
 
 
-@pytest.mark.parametrize(("micros", "usd"), [(1_000, "0.001"), (10_000_000, "10"), (0, "0"), (2_500_000, "2.5")])
+@pytest.mark.parametrize(
+    ("micros", "usd"), [(1_000, "0.001"), (10_000_000, "10"), (0, "0"), (2_500_000, "2.5")]
+)
 def test_micros_to_usd_is_exact_and_readable(micros: int, usd: str) -> None:
     assert str(micros_to_usd(micros)) == usd

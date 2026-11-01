@@ -75,7 +75,7 @@ async def test_unpaid_request_returns_402_with_cart_mandate_offering_aibank() ->
 async def test_paid_request_settles_via_aibank_and_returns_result() -> None:
     protocol = _new_protocol()
     seller = protocol.provision_aibank_account("seller")
-    buyer = protocol.provision_aibank_account("buyer")
+    buyer = protocol.provision_aibank_buyer(agent_name="Agente comprador de pruebas")
     app = _build_app(protocol, pay_to=seller.account_id)
     port = _free_port()
     server = _run_app(app, port)
@@ -108,7 +108,7 @@ async def test_reusing_the_same_cart_mandate_twice_is_rejected_and_charged_once(
     misma autorización en vez de cobrar dos veces."""
     protocol = _new_protocol()
     seller = protocol.provision_aibank_account("seller")
-    buyer = protocol.provision_aibank_account("buyer")
+    buyer = protocol.provision_aibank_buyer(agent_name="Agente comprador de pruebas")
     balance_before = protocol._mock_bank.available_balance(buyer.account_id)
     app = _build_app(protocol, pay_to=seller.account_id)
     port = _free_port()
@@ -154,8 +154,12 @@ async def test_paid_request_settles_via_aibank_model_b_mandate() -> None:
     server = _run_app(app, port)
 
     try:
+        identity = protocol.provision_aibank_agent("Agente de investigación de Acme S.A.")
         request = await protocol.aibank.create_consent_request(
-            purpose="Pagos del agente de investigación de Acme S.A.", max_per_operation=1_000_000, max_total=10_000_000
+            agent_id=identity.agent_id,
+            purpose="Pagos del agente de investigación de Acme S.A.",
+            max_per_operation=1_000_000,
+            max_total=10_000_000,
         )
         holders = protocol.aibank_holder_channel
         holder = await holders.create_test_holder(name="Ana", initial_balance=50_000_000)
@@ -166,7 +170,9 @@ async def test_paid_request_settles_via_aibank_model_b_mandate() -> None:
         # canal del titular (AE-06).
         approved = await protocol.aibank.get_consent_request(request.consent_request_id)
         assert approved.mandate_id is not None and approved.account_id is not None
-        buyer = AIBankMandateCredential(mandate_id=approved.mandate_id, account_id=approved.account_id)
+        buyer = AIBankMandateCredential(
+            mandate_id=approved.mandate_id, account_id=approved.account_id, agent=identity
+        )
 
         buyer_client = protocol.build_buyer_client(buyer)
         try:
@@ -200,7 +206,8 @@ async def test_paying_from_an_account_the_integration_never_opened_is_rejected()
     server = _run_app(app, port)
 
     try:
-        impostor = AIBankSubAccount(account_id="acc_" + "0" * 32)
+        agent = protocol.provision_aibank_agent("Agente sin cuenta")
+        impostor = AIBankSubAccount(account_id="acc_" + "0" * 32, agent=agent)
         impostor_client = protocol.build_buyer_client(impostor)
         try:
             with pytest.raises(AIBankError, match="account_not_found"):
